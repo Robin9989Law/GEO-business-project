@@ -154,7 +154,7 @@ def test_04_sprint_05_requires_intervention_completion() -> None:
     try:
         engine.apply_fields(st, {"fields": {"intervention_class": "FAQ", "intervention_need_ids": "N01", "holdout_untouched": "是", "verdict_4": "受控前后描述"}}, cases_root=root)
     except ValueError as e:
-        assert "verdict_4" in str(e) or "wait_days" in str(e) or "intervention_completed_on" in str(e)
+        assert "wait" in str(e).lower() or "verdict_4" in str(e) or "intervention_completed_on" in str(e)
         print("✅ #4 冲刺 05 未完成等待期不得写 verdict_4")
     else:
         raise AssertionError("sprint 05 without wait must fail verdict_4")
@@ -389,6 +389,78 @@ def test_13_three_full_paths() -> None:
     print("✅ #13 诊断/冲刺/续约三条完整路径均能走到 G8")
 
 
+def test_causal_claim_cannot_lock_did_at_02() -> None:
+    root = _root()
+    st = _start(root, "acc-cc")
+    engine.apply_fields(
+        st,
+        {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "冲刺", "ban_ack": "是"}},
+    )
+    _approve(st, "G0", root)
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "project_id": "P1",
+                    "owner": "编排",
+                    "sop_stage": "冲刺",
+                    "primary_goal": engine.PRIMARY_GOAL_TEXT,
+                    "primary_endpoint": "p_mention",
+                    "causal_claim": "did_isolated",
+                    "control_design": "监测组",
+                    "success_rule_diagnosis": "描述基线",
+                    "success_rule_sprint": "受控前后描述",
+                    "success_rule_retain": "不能下结论",
+                    "treat_need_ids": "N01",
+                    "holdout_need_ids": "H01",
+                    "platforms_required": "P0",
+                }
+            },
+        )
+    except ValueError as e:
+        assert "descriptive_until_isolation" in str(e)
+        print("✅ 02 不得锁 did_isolated")
+    else:
+        raise AssertionError("02 causal_claim=did_isolated must fail")
+
+
+def test_sprint_wait_clock_must_elapse() -> None:
+    root = _root()
+    st = _start(root, "acc-wait")
+    _lock_01_02(st, "冲刺", root)
+    _lock_07_08(st, "冲刺", root)
+    _apply03(st, root)
+    _seed_stage_out(root, st)
+    _dual_decide(st, "G3", root)
+    engine.apply_fields(
+        st,
+        {"windows": ["day0", "noise", "baseline", "intervention", "wait", "retest"], "fields": {"plan_hours": "10"}},
+    )
+    _approve(st, "G2", root)
+    _seed_stage_out(root, st)
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "intervention_class": "FAQ",
+                    "intervention_need_ids": "N01",
+                    "holdout_untouched": "是",
+                    "intervention_completed_on": "2026-08-15",
+                    "wait_days": "7",
+                    "verdict_4": "受控前后描述",
+                }
+            },
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "wait" in str(e).lower()
+        print("✅ 冲刺等待时钟未满不得写 verdict_4")
+    else:
+        raise AssertionError("unelapsed wait must fail")
+
+
 # ---- 冻结表行集：queries.csv / platforms.csv 必须对上合同字段 ----
 def test_freeze_tables_must_match_need_and_platform_sets() -> None:
     import csv
@@ -442,7 +514,7 @@ def test_14_agent_terms_match_registry() -> None:
     import subprocess
     r = subprocess.run(["python3", "工程/check_doc_consistency.py"], capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
     assert r.returncode == 0, f"跨文档一致性失败:\n{r.stdout}\n{r.stderr}"
-    assert "0 issues across 9 checks" in r.stdout
+    assert "0 issues across 10 checks" in r.stdout
     print("✅ #14 Agent 提示词术语与统一注册表一致")
 
 
@@ -462,8 +534,10 @@ def main() -> int:
     test_13_three_full_paths()
     test_14_agent_terms_match_registry()
     test_freeze_tables_must_match_need_and_platform_sets()
+    test_causal_claim_cannot_lock_did_at_02()
+    test_sprint_wait_clock_must_elapse()
     print()
-    print("summary: 14/14 验收测试通过 + 冻结表行集")
+    print("summary: 14/14 验收测试通过 + 冻结表/因果/等待时钟")
     return 0
 
 

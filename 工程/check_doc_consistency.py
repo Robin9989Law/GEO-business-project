@@ -185,6 +185,30 @@ def check_8_verdict4_source_in_agents() -> list[str]:
     return issues
 
 
+def check_10_glossary() -> list[str]:
+    issues: list[str] = []
+    path = ROOT / "合同" / "术语表.md"
+    if not path.is_file():
+        return ["missing 合同/术语表.md"]
+    text = path.read_text(encoding="utf-8")
+    for token in (
+        "p_mention",
+        "p_recommend",
+        "App 可见性",
+        "API 哨兵",
+        "监测组",
+        "噪声底",
+        "受控前后描述",
+        "确认性 L1",
+        "项目账",
+        "资产账",
+        "descriptive_until_isolation",
+    ):
+        if token not in text:
+            issues.append(f"术语表 missing {token!r}")
+    return issues
+
+
 def check_9_unit_uniform() -> list[str]:
     """所有 *hours 字段说明必须用"人时"；不能用"人天"裸词。"""
     issues: list[str] = []
@@ -212,6 +236,7 @@ CHECKS = [
     ("阶段交付物注册.md ↔ files.STAGE_DELIVERABLES", check_7_registry_match),
     ("verdict_4 写入规则在各 agent 提示词中一致", check_8_verdict4_source_in_agents),
     ("单位统一：人时（不允许裸'人天'）", check_9_unit_uniform),
+    ("术语表覆盖关键概念", check_10_glossary),
 ]
 
 

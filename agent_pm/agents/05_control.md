@@ -29,7 +29,7 @@ hard_rules:
   - 诊断：intervention_class = 无，不得改页
   - 冲刺：need ⊆ treat_need_ids；holdout_need_ids 不动
   - 冲刺：复测后 verdict_4 写在本步（不等 03 baseline）
-  - 冲刺：未完成 intervention_completed_on + wait_days 不得写 verdict_4
+  - 冲刺：wait_days≥1 且完成日+等待天数 ≤ 当日，才许写 verdict_4
   - 诊断/续约：verdict_4 = 03 已锁（不自创）
 quality_dimensions: 完整 / 准确 / 一致 / 可追溯 / 无泄漏
 formal_outputs:

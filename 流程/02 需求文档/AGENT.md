@@ -19,7 +19,7 @@
 - 处理组 `treat_need_ids`：本轮要动的信息需求。  
 - 监测组 `holdout_need_ids`：同品类同城、本轮不优化；与处理组不能相交。  
 - 平台默认 P0，分平台出数，禁止平均。  
-- `primary_endpoint` 只能 `p_mention`；`causal_claim` 默认 `descriptive_until_isolation`。  
+- `primary_endpoint` 只能 `p_mention`；`causal_claim` 在本步必须是 `descriptive_until_isolation`。`did_isolated` 只能在 05 确认性 L1 且 DiD 通过后写入。  
 - 三套验收规则必须写全且与产品线一致：`success_rule_diagnosis`（描述基线/不能下结论）、`success_rule_sprint`（受控前后描述/确认性 L1/不能下结论）、`success_rule_retain`（只能不能下结论）。
 
 ## 你要做

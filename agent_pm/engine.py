@@ -7,7 +7,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,6 +133,30 @@ def load_writers(path: Path = FIELDS_CSV) -> dict[str, frozenset]:
                 out[field] = frozenset(s for s in stage.split("|") if s)
     out.setdefault("sop_stage_intent", frozenset({"01"}))
     return out
+
+
+def utc_today():
+    return datetime.now(timezone.utc).date()
+
+
+def parse_iso_date(val: object):
+    raw = str(val or "").strip()[:10]
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def sprint_wait_elapsed(fields: dict, today=None) -> bool:
+    completed = parse_iso_date(fields.get("intervention_completed_on"))
+    try:
+        wait = int(float(str(fields.get("wait_days") or "").strip()))
+    except ValueError:
+        return False
+    if completed is None or wait < 1:
+        return False
+    day = today or utc_today()
+    return completed + timedelta(days=wait) <= day
 
 
 def now() -> str:
@@ -428,10 +452,13 @@ def missing_required(
         if extra:
             miss.append("intervention_need_ids")
         try:
-            if float(str(fields.get("wait_days") or "").strip()) < 0:
+            wait = float(str(fields.get("wait_days") or "").strip())
+            if wait < 1:
                 miss.append("wait_days")
         except ValueError:
             miss.append("wait_days")
+        if fields.get("verdict_4") and not sprint_wait_elapsed(fields):
+            miss.append("wait_elapsed")
     if stage == "06":
         if fields.get("freeze_match") and not _is_yes(fields.get("freeze_match")):
             miss.append("freeze_match")
@@ -1143,8 +1170,8 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
         if ep is not None and str(ep).strip() != "p_mention":
             _fail("primary_endpoint must be p_mention")
         cc = incoming.get("causal_claim", state["fields"].get("causal_claim"))
-        if cc is not None and str(cc).strip() not in CAUSAL_CLAIM_OK:
-            _fail(f"causal_claim must be one of {sorted(CAUSAL_CLAIM_OK)}")
+        if cc is not None and str(cc).strip() != "descriptive_until_isolation":
+            _fail("causal_claim must stay descriptive_until_isolation until isolation is evidenced at 05")
         cd = incoming.get("control_design", state["fields"].get("control_design"))
         if cd is not None:
             cd_s = str(cd).strip()
@@ -1220,6 +1247,7 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
             incoming.pop(key, None)
         if incoming.get("verdict_4") == "确认性 L1":
             incoming.update(derive_l1_from_files(state["case_id"], _merged_fields(state, incoming, payload), cases_root))
+            incoming["causal_claim"] = "did_isolated"
         if sop == "冲刺":
             needs = _norm_ids(incoming.get("intervention_need_ids", state["fields"].get("intervention_need_ids")))
             treat = _norm_ids(state["fields"].get("treat_need_ids"))
@@ -1228,12 +1256,15 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
             hold = incoming.get("holdout_untouched", state["fields"].get("holdout_untouched"))
             if hold is not None and not _is_yes(hold):
                 _fail("holdout group must stay untouched")
+            merged_wait = _merged_fields(state, incoming, payload)
             if incoming.get("wait_days", state["fields"].get("wait_days")) is not None:
                 try:
-                    if float(str(incoming.get("wait_days", state["fields"].get("wait_days"))).strip()) < 0:
-                        _fail("wait_days must be >= 0")
+                    if float(str(incoming.get("wait_days", state["fields"].get("wait_days"))).strip()) < 1:
+                        _fail("wait_days must be >= 1")
                 except ValueError:
                     _fail("wait_days must be a number")
+            if incoming.get("verdict_4") and not sprint_wait_elapsed(merged_wait):
+                _fail("sprint wait period not elapsed")
     if stage == "03":
         fid = incoming.get("freeze_id", state["fields"].get("freeze_id", ""))
         fd = resolve_freeze_dir(str(fid), state["case_id"], cases_root)

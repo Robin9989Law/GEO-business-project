@@ -56,7 +56,7 @@ def _apply05_sprint(st: dict, root: Path) -> None:
                 "intervention_class": "FAQ 调整",
                 "intervention_need_ids": "N01",
                 "holdout_untouched": "是",
-                "intervention_completed_on": "2026-08-10",
+                "intervention_completed_on": "2026-08-01",
                 "wait_days": "7",
                 "verdict_4": "受控前后描述",
             }

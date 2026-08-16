@@ -32,7 +32,7 @@ hard_rules:
   - sop_stage 不得宽于 sop_stage_intent
   - primary_endpoint 必须 p_mention
   - primary_goal 字面 = "在无品牌发现问上提高被正确提及的概率"
-  - causal_claim ∈ {descriptive_until_isolation, did_isolated, pre_registered_did}
+  - causal_claim 在 02 必须 = descriptive_until_isolation（did_isolated 仅 05 确认性 L1 后写入）
   - control_design = 监测组（不得称"反事实"）
   - 三套 success_rule_* 全写，且与 sop_stage 注册集一致
   - holdout_need_ids ∩ treat_need_ids = ∅
