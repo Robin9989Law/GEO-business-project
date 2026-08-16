@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             "pick",
             "ack",
             "board",
+            "check-vault",
             "profile",
             "review",
             "appeal",
@@ -168,6 +169,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(files.format_board(b))
             return 0
+        if args.cmd == "check-vault":
+            if args.case_id in {"ALL", "*", "."}:
+                report = files.check_all_vaults(cases_root=root, files_root=froot)
+            else:
+                report = files.check_vault(args.case_id, cases_root=root, files_root=froot)
+            _print(report)
+            return 0 if report.get("ok") else 1
         state = engine.load_state(args.case_id, root)
         teaching.ensure_process(state)
         if args.cmd == "profile":

@@ -22,4 +22,5 @@
 | [模板/看板.md](模板/看板.md) | 看板空页 |
 | `案件/` | 开单实例，不是模板 |
 
-开单：`python3 agent_pm/run.py init 本案` 会在 `案件/{本案}/` 建好三区。
+开单：`python3 agent_pm/run.py init 本案` 会在 `案件/{本案}/` 建好三区。  
+核对登记与文件夹是否一致（内存重建，不建库）：`python3 agent_pm/run.py check-vault 本案`。

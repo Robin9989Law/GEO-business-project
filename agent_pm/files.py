@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import csv
+import fcntl
 import hashlib
 import json
 import re
 import shutil
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +31,55 @@ BANNED_CLAIMS = (
 STAGES = ("01", "02", "07", "08", "03", "04", "05", "06", "09")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._\u4e00-\u9fff\-]+$")
 
+# 阶段交付物注册（与 合同/阶段交付物注册.md 一一对应；这是硬校验源）
+STAGE_DELIVERABLES: dict[str, dict[str, dict]] = {
+    "01": {
+        "01_商机卡": {"required": True, "gate": "G0"},
+    },
+    "02": {
+        "02_章程": {"required": True, "gate": "G1"},
+        "02_验收标准": {"required": True, "gate": "G1"},
+        "02_需求规格": {"required": True, "gate": "G1"},
+    },
+    "07": {
+        "07_预算": {"required": True, "gate": "G6"},
+    },
+    "08": {
+        "08_沟通矩阵": {"required": True, "gate": "G7"},
+        "08_干系人": {"required": True, "gate": "G7"},
+    },
+    "03": {
+        "03_冻结包": {"required": True, "gate": "G3"},
+        "03_环境登记": {"required": True, "gate": "G3"},
+        "03_出数报告": {"required": True, "gate": "G3"},
+    },
+    "04": {
+        "04_进度": {"required": True, "gate": "G2"},
+    },
+    "05": {
+        "05_周报": {"required": True, "gate": "G5"},
+        "05_干预轮次卡": {"required": False, "gate": "G5"},
+    },
+    "06": {
+        "06_客户报告": {"required": True, "gate": "G4"},
+        "06_验收单": {"required": True, "gate": "G4"},
+    },
+    "09": {
+        "09_结项报告": {"required": True, "gate": "G8"},
+        "09_经验教训": {"required": True, "gate": "G8"},
+        "09_资产移交": {"required": True, "gate": "G8"},
+    },
+}
+
+
+def _doc_in_registry(stage: str, doc_id: str) -> tuple[bool, str]:
+    """返回 (是否在注册表, 错误信息)。"""
+    if stage not in STAGE_DELIVERABLES:
+        return False, f"unknown stage {stage}"
+    if doc_id not in STAGE_DELIVERABLES[stage]:
+        return False, f"doc_id {doc_id} not in registry for stage {stage}"
+    return True, ""
+
 RAW_FIELDS = ("raw_id", "at", "stage", "title", "filename", "checksum", "kind", "src", "actor", "quarantine")
 DOC_FIELDS = (
     "doc_id",
@@ -44,6 +97,15 @@ DOC_FIELDS = (
 LOCK_FIELDS = ("doc_id", "member", "at", "note")
 XFER_FIELDS = ("item_id", "at", "action", "sender", "receiver", "filename", "checksum", "status", "note")
 MEMBER_FIELDS = ("member_id", "role", "notes")
+CSV_KEY_FIELDS = {
+    "登记.csv": ("raw_id",),
+    "清单.csv": ("doc_id", "rev"),
+    "锁.csv": ("doc_id",),
+    "往来.csv": ("item_id", "action", "at"),
+    "成员登记.csv": ("member_id",),
+}
+LOCK_TIMEOUT_SEC = 15.0
+_TLS = threading.local()
 
 
 def now() -> str:
@@ -52,6 +114,75 @@ def now() -> str:
 
 def _fail(msg: str) -> None:
     raise ValueError(msg)
+
+
+@contextmanager
+def vault_lock(vault: Path, timeout: float = LOCK_TIMEOUT_SEC):
+    """本案写锁。同进程可重入；跨进程 flock 互斥。"""
+    vault = Path(vault)
+    vault.mkdir(parents=True, exist_ok=True)
+    key = str(vault.resolve())
+    depth = getattr(_TLS, "depth", None)
+    if depth is None:
+        depth = {}
+        _TLS.depth = depth
+    if depth.get(key, 0) > 0:
+        depth[key] += 1
+        try:
+            yield
+        finally:
+            depth[key] -= 1
+        return
+    lock_path = vault / ".write.lock"
+    fh = lock_path.open("a+")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                _fail(f"vault write lock timeout: {vault.name}")
+            time.sleep(0.05)
+    depth[key] = 1
+    try:
+        yield
+    finally:
+        depth[key] -= 1
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _duplicate_keys(rows: list[dict], key_fields: tuple[str, ...]) -> list[str]:
+    seen: set[tuple[str, ...]] = set()
+    dups: list[str] = []
+    for row in rows:
+        key = tuple(str(row.get(k) or "").strip() for k in key_fields)
+        if not any(key):
+            continue
+        if key in seen:
+            dups.append("+".join(key))
+        seen.add(key)
+    return dups
 
 
 def vault_path(case_id: str, cases_root: Path | None = None, files_root: Path | None = None) -> Path:
@@ -88,12 +219,25 @@ def _read_csv(path: Path, fields: tuple[str, ...]) -> list[dict]:
 
 
 def _write_csv(path: Path, fields: tuple[str, ...], rows: list[dict]) -> None:
+    path = Path(path)
+    keys = CSV_KEY_FIELDS.get(path.name)
+    if keys:
+        dups = _duplicate_keys(rows, keys)
+        if dups:
+            _fail(f"duplicate key in {path.name}: {dups[0]}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(fields))
-        w.writeheader()
-        for row in rows:
-            w.writerow({k: row.get(k, "") for k in fields})
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(fields))
+            w.writeheader()
+            for row in rows:
+                w.writerow({k: row.get(k, "") for k in fields})
+        tmp.replace(path)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
 
 
 def _append_csv(path: Path, fields: tuple[str, ...], row: dict) -> None:
@@ -142,6 +286,18 @@ def init_vault(case_id: str, cases_root: Path | None = None, files_root: Path | 
     vault = vault_path(case_id, cases_root, files_root)
     if (vault / "原始" / "登记.csv").is_file():
         return vault
+    with vault_lock(vault):
+        if (vault / "原始" / "登记.csv").is_file():
+            return vault
+        return _init_vault_body(case_id, vault, cases_root, files_root)
+
+
+def _init_vault_body(
+    case_id: str,
+    vault: Path,
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> Path:
     for stage in STAGES:
         (vault / "原始" / stage).mkdir(parents=True, exist_ok=True)
     (vault / "正式" / "现行").mkdir(parents=True, exist_ok=True)
@@ -186,6 +342,21 @@ def deposit_raw(
     if not src_p.is_file():
         _fail(f"no file {src_p}")
     hits = find_banned(src_p)
+    vault = vault_path(case_id, cases_root, files_root)
+    with vault_lock(vault):
+        return _deposit_raw_body(case_id, src_p, stage, title, actor, hits, cases_root, files_root)
+
+
+def _deposit_raw_body(
+    case_id: str,
+    src_p: Path,
+    stage: str,
+    title: str,
+    actor: str,
+    hits: list[str],
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> dict:
     vault = init_vault(case_id, cases_root, files_root)
     dest_dir = vault / "原始" / stage
     if hits:
@@ -233,6 +404,18 @@ def deposit_inbox(case_id: str, stage: str, cases_root: Path | None = None, file
     inbox = (cases_root or DEFAULT_CASES) / case_id / "inbox"
     if not inbox.is_dir():
         return []
+    vault = vault_path(case_id, cases_root, files_root)
+    with vault_lock(vault):
+        return _deposit_inbox_body(case_id, stage, inbox, cases_root, files_root)
+
+
+def _deposit_inbox_body(
+    case_id: str,
+    stage: str,
+    inbox: Path,
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> list[dict]:
     vault = init_vault(case_id, cases_root, files_root)
     seen = {(r.get("stage"), r.get("checksum")) for r in _read_csv(vault / "原始" / "登记.csv", RAW_FIELDS)}
     candidates: list[Path] = []
@@ -291,6 +474,30 @@ def promote_formal(
         _fail(f"no file {src_p}")
     _scan_banned(src_p)
     doc_id = _require_doc_id(doc_id)
+    if stage:
+        ok, err = _doc_in_registry(stage, doc_id)
+        if not ok:
+            _fail(err)
+    vault = vault_path(case_id, cases_root, files_root)
+    with vault_lock(vault):
+        return _promote_formal_body(
+            case_id, src_p, doc_id, gate, stage, title, raw_id, actor, member, cases_root, files_root
+        )
+
+
+def _promote_formal_body(
+    case_id: str,
+    src_p: Path,
+    doc_id: str,
+    gate: str,
+    stage: str,
+    title: str,
+    raw_id: str,
+    actor: str,
+    member: str,
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> dict:
     vault = init_vault(case_id, cases_root, files_root)
     locks = _locks(vault)
     if doc_id in locks and member and locks[doc_id]["member"] != member:
@@ -374,6 +581,17 @@ def invalidate_from(case_id: str, stages: list[str], cases_root: Path | None = N
     vault = vault_path(case_id, cases_root, files_root)
     if not (vault / "正式" / "清单.csv").is_file():
         return
+    with vault_lock(vault):
+        _invalidate_from_body(case_id, stages, vault, cases_root, files_root)
+
+
+def _invalidate_from_body(
+    case_id: str,
+    stages: list[str],
+    vault: Path,
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> None:
     docs = _docs(vault)
     stage_set = set(stages)
     changed = False
@@ -426,6 +644,20 @@ def promote_stage_outputs(
     out_dir = (cases_root or DEFAULT_CASES) / case_id / "out"
     if not out_dir.is_dir():
         return []
+    vault = vault_path(case_id, cases_root, files_root)
+    with vault_lock(vault):
+        return _promote_stage_outputs_body(state, case_id, stage, gate, out_dir, cases_root, files_root)
+
+
+def _promote_stage_outputs_body(
+    state: dict,
+    case_id: str,
+    stage: str,
+    gate: str,
+    out_dir: Path,
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> list[dict]:
     vault = init_vault(case_id, cases_root, files_root)
     current = {d["doc_id"]: d for d in _docs(vault) if d.get("status") == "现行"}
     candidates: list[Path] = []
@@ -470,6 +702,19 @@ def checkout(
     member = member.strip()
     if not member:
         _fail("member required")
+    vault = vault_path(case_id, cases_root, files_root)
+    with vault_lock(vault):
+        return _checkout_body(case_id, doc_id, member, note, cases_root, files_root)
+
+
+def _checkout_body(
+    case_id: str,
+    doc_id: str,
+    member: str,
+    note: str,
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> dict:
     vault = init_vault(case_id, cases_root, files_root)
     docs = [d for d in _docs(vault) if d.get("doc_id") == doc_id and d.get("status") == "现行"]
     if not docs:
@@ -523,6 +768,20 @@ def drop_exchange(
     sender, receiver = sender.strip(), receiver.strip()
     if not sender or not receiver:
         _fail("sender and receiver required")
+    vault = vault_path(case_id, cases_root, files_root)
+    with vault_lock(vault):
+        return _drop_exchange_body(case_id, src_p, sender, receiver, note, cases_root, files_root)
+
+
+def _drop_exchange_body(
+    case_id: str,
+    src_p: Path,
+    sender: str,
+    receiver: str,
+    note: str,
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> dict:
     vault = init_vault(case_id, cases_root, files_root)
     n = len(_read_csv(vault / "中转" / "往来.csv", XFER_FIELDS)) + 1
     item_id = f"X{n:04d}"
@@ -558,6 +817,18 @@ def pick_exchange(
     cases_root: Path | None = None,
     files_root: Path | None = None,
 ) -> dict:
+    vault = vault_path(case_id, cases_root, files_root)
+    with vault_lock(vault):
+        return _pick_exchange_body(case_id, item_id, member, cases_root, files_root)
+
+
+def _pick_exchange_body(
+    case_id: str,
+    item_id: str,
+    member: str,
+    cases_root: Path | None,
+    files_root: Path | None,
+) -> dict:
     vault = init_vault(case_id, cases_root, files_root)
     last = _xfer_latest(vault, item_id)
     if last["status"] != "待取":
@@ -583,6 +854,18 @@ def ack_exchange(
     member: str,
     cases_root: Path | None = None,
     files_root: Path | None = None,
+) -> dict:
+    vault = vault_path(case_id, cases_root, files_root)
+    with vault_lock(vault):
+        return _ack_exchange_body(case_id, item_id, member, cases_root, files_root)
+
+
+def _ack_exchange_body(
+    case_id: str,
+    item_id: str,
+    member: str,
+    cases_root: Path | None,
+    files_root: Path | None,
 ) -> dict:
     vault = init_vault(case_id, cases_root, files_root)
     last = _xfer_latest(vault, item_id)
@@ -667,8 +950,200 @@ def format_board(b: dict) -> str:
 
 def write_board(case_id: str, cases_root: Path | None = None, files_root: Path | None = None) -> Path:
     vault = vault_path(case_id, cases_root, files_root)
-    b = board(case_id, cases_root, files_root)
-    path = vault / "中转" / "看板.md"
-    path.write_text(format_board(b) + "\n", encoding="utf-8")
-    (vault / "中转" / "board.json").write_text(json.dumps(b, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return path
+    with vault_lock(vault):
+        b = board(case_id, cases_root, files_root)
+        md_path = vault / "中转" / "看板.md"
+        js_path = vault / "中转" / "board.json"
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_tmp = md_path.with_name(md_path.name + ".tmp")
+        js_tmp = js_path.with_name(js_path.name + ".tmp")
+        try:
+            md_tmp.write_text(format_board(b) + "\n", encoding="utf-8")
+            js_tmp.write_text(json.dumps(b, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            js_tmp.replace(js_path)
+            md_tmp.replace(md_path)
+        except Exception:
+            for tmp in (md_tmp, js_tmp):
+                if tmp.exists():
+                    tmp.unlink()
+            raise
+        return md_path
+
+
+def members(case_id: str, cases_root: Path | None = None, files_root: Path | None = None) -> list[dict]:
+    vault = init_vault(case_id, cases_root, files_root)
+    return _read_csv(vault / "成员登记.csv", MEMBER_FIELDS)
+
+
+def list_vault_cases(cases_root: Path | None = None, files_root: Path | None = None) -> list[str]:
+    if files_root is not None:
+        root = Path(files_root)
+        marker = Path("原始") / "登记.csv"
+    elif cases_root is not None:
+        root = Path(cases_root)
+        marker = Path("vault") / "原始" / "登记.csv"
+    else:
+        root = PROD_VAULTS
+        marker = Path("原始") / "登记.csv"
+    if not root.is_dir():
+        return []
+    found = []
+    for p in sorted(root.iterdir()):
+        if p.is_dir() and (p / marker).is_file():
+            found.append(p.name)
+    return found
+
+
+def rebuild_catalog(case_id: str, cases_root: Path | None = None, files_root: Path | None = None) -> dict:
+    """从文件夹和 CSV 在内存里重建索引。不写数据库。"""
+    vault = vault_path(case_id, cases_root, files_root)
+    raw = _read_csv(vault / "原始" / "登记.csv", RAW_FIELDS)
+    docs = _docs(vault) if (vault / "正式" / "清单.csv").is_file() else []
+    xf = _read_csv(vault / "中转" / "往来.csv", XFER_FIELDS)
+    lock_rows = _read_csv(vault / "正式" / "锁.csv", LOCK_FIELDS)
+    member_rows = _read_csv(vault / "成员登记.csv", MEMBER_FIELDS)
+    latest: dict[str, dict] = {}
+    for r in xf:
+        if r.get("item_id"):
+            latest[r["item_id"]] = r
+    pending = [r for r in latest.values() if r.get("status") in {"待取", "已领取"}]
+    current = [d for d in docs if d.get("status") == "现行"]
+    return {
+        "case_id": case_id,
+        "vault": str(vault),
+        "raw": raw,
+        "formal": docs,
+        "transfers": xf,
+        "locks": [r for r in lock_rows if r.get("doc_id")],
+        "members": member_rows,
+        "pending": pending,
+        "current_docs": current,
+        "counts": {
+            "raw": len(raw),
+            "formal_current": len(current),
+            "formal_all": len(docs),
+            "transfers": len(xf),
+            "pending": len(pending),
+            "locks": len([r for r in lock_rows if r.get("doc_id")]),
+            "members": len([r for r in member_rows if r.get("member_id")]),
+        },
+    }
+
+
+def _csv_dup_errors(path: Path, fields: tuple[str, ...]) -> list[str]:
+    keys = CSV_KEY_FIELDS.get(path.name)
+    if not keys or not path.is_file():
+        return []
+    dups = _duplicate_keys(_read_csv(path, fields), keys)
+    return [f"dup:{path.name}:{d}" for d in dups]
+
+
+def _resolve_listed_path(vault: Path, rel_or_abs: str) -> Path:
+    p = Path(rel_or_abs)
+    if p.is_file():
+        return p
+    cand = vault / rel_or_abs
+    if cand.is_file():
+        return cand
+    try:
+        cand = ROOT / rel_or_abs
+        if cand.is_file():
+            return cand
+    except OSError:
+        pass
+    return p
+
+
+def check_vault(case_id: str, cases_root: Path | None = None, files_root: Path | None = None) -> dict:
+    """对照文件库重建内存索引，报告漂移。不引入 SQLite。"""
+    vault = vault_path(case_id, cases_root, files_root)
+    catalog = rebuild_catalog(case_id, cases_root, files_root)
+    errs: list[str] = []
+    if not (vault / "原始" / "登记.csv").is_file():
+        return {"ok": False, "case_id": case_id, "errors": ["no_vault"], "catalog": catalog["counts"]}
+    errs.extend(_csv_dup_errors(vault / "原始" / "登记.csv", RAW_FIELDS))
+    errs.extend(_csv_dup_errors(vault / "正式" / "清单.csv", DOC_FIELDS))
+    errs.extend(_csv_dup_errors(vault / "正式" / "锁.csv", LOCK_FIELDS))
+    errs.extend(_csv_dup_errors(vault / "中转" / "往来.csv", XFER_FIELDS))
+    errs.extend(_csv_dup_errors(vault / "成员登记.csv", MEMBER_FIELDS))
+    for row in catalog["raw"]:
+        raw_id = row.get("raw_id") or "raw"
+        stage = row.get("stage") or ""
+        fname = row.get("filename") or ""
+        hits = []
+        if stage and fname:
+            hits = [
+                vault / "原始" / stage / fname,
+                vault / "原始" / stage / "隔离" / fname,
+            ]
+        if not any(p.is_file() for p in hits):
+            errs.append(f"raw_missing:{raw_id}")
+    current_dir = vault / "正式" / "现行"
+    registered: set[str] = set()
+    for doc in catalog["current_docs"]:
+        doc_id = doc.get("doc_id") or ""
+        suffix = Path(doc.get("path") or ".md").suffix or ".md"
+        current = current_dir / f"{doc_id}{suffix}"
+        if not current.is_file() and doc_id:
+            hits = list(current_dir.glob(doc_id + ".*"))
+            current = hits[0] if hits else current
+        if current.is_file():
+            registered.add(current.name)
+        if not current.is_file() or _sha256(current) != (doc.get("checksum") or ""):
+            errs.append(f"current:{doc_id or 'doc'}")
+    if current_dir.is_dir():
+        for p in current_dir.iterdir():
+            if p.is_file() and not p.name.startswith(".") and p.name not in registered:
+                errs.append(f"unregistered:{p.name}")
+    for doc in catalog["formal"]:
+        if doc.get("status") not in {"历史", "现行"}:
+            continue
+        stored = _resolve_listed_path(vault, doc.get("path") or "")
+        if not stored.is_file() or _sha256(stored) != (doc.get("checksum") or ""):
+            errs.append(f"version:{doc.get('doc_id') or 'doc'}:r{doc.get('rev') or '?'}")
+    js_path = vault / "中转" / "board.json"
+    md_path = vault / "中转" / "看板.md"
+    if not md_path.is_file():
+        errs.append("看板.md")
+    if not js_path.is_file():
+        errs.append("board.json")
+    else:
+        try:
+            data = json.loads(js_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            errs.append("board.json")
+            data = {}
+        pending_ids = {str(r.get("item_id") or "") for r in (data.get("pending") or [])}
+        want_pending = {str(r.get("item_id") or "") for r in catalog["pending"]}
+        if pending_ids != want_pending:
+            errs.append("board_pending_drift")
+        current_ids = {str(r.get("doc_id") or "") for r in (data.get("current_docs") or [])}
+        want_current = {str(r.get("doc_id") or "") for r in catalog["current_docs"]}
+        if current_ids != want_current:
+            errs.append("board_current_drift")
+        lock_ids = {str(r.get("doc_id") or "") for r in (data.get("locks") or [])}
+        want_locks = {str(r.get("doc_id") or "") for r in catalog["locks"]}
+        if lock_ids != want_locks:
+            errs.append("board_lock_drift")
+    for tmp in vault.rglob("*.tmp"):
+        if tmp.is_file():
+            errs.append(f"tmp:{tmp.name}")
+    return {
+        "ok": not errs,
+        "case_id": case_id,
+        "errors": errs,
+        "catalog": catalog["counts"],
+        "members": [r.get("member_id") for r in catalog["members"] if r.get("member_id")],
+    }
+
+
+def check_all_vaults(cases_root: Path | None = None, files_root: Path | None = None) -> dict:
+    cases = list_vault_cases(cases_root, files_root)
+    reports = [check_vault(cid, cases_root, files_root) for cid in cases]
+    errs = [r["case_id"] + ":" + e for r in reports for e in r.get("errors") or []]
+    return {
+        "ok": all(r.get("ok") for r in reports) if reports else True,
+        "cases": cases,
+        "errors": errs,
+        "reports": reports,
+    }

@@ -41,14 +41,14 @@ def test_deposit_and_promote_versions() -> None:
     assert raw["kind"] == "copy"
     vault = files.vault_path("c1", root)
     assert (vault / "原始" / "01" / src.name).is_file()
-    v1 = files.promote_formal("c1", src, "01_客户原话", gate="G0", stage="01", cases_root=root)
+    v1 = files.promote_formal("c1", src, "01_商机卡", gate="G0", stage="01", cases_root=root)
     assert v1["rev"] == "1"
-    v2 = files.promote_formal("c1", src, "01_客户原话", gate="G0", stage="01", cases_root=root)
+    v2 = files.promote_formal("c1", src, "01_商机卡", gate="G0", stage="01", cases_root=root)
     assert v2["rev"] == "2"
-    assert (vault / "正式" / "版本" / "v001" / "01_客户原话.md").is_file()
-    assert (vault / "正式" / "版本" / "v002" / "01_客户原话.md").is_file()
-    assert (vault / "正式" / "现行" / "01_客户原话.md").is_file()
-    docs = [d for d in files._docs(vault) if d["doc_id"] == "01_客户原话"]
+    assert (vault / "正式" / "版本" / "v001" / "01_商机卡.md").is_file()
+    assert (vault / "正式" / "版本" / "v002" / "01_商机卡.md").is_file()
+    assert (vault / "正式" / "现行" / "01_商机卡.md").is_file()
+    docs = [d for d in files._docs(vault) if d["doc_id"] == "01_商机卡"]
     assert any(d["status"] == "历史" and d["rev"] == "1" for d in docs)
     assert any(d["status"] == "现行" and d["rev"] == "2" for d in docs)
 
@@ -62,7 +62,7 @@ def test_banned_claim_quarantined_not_rejected() -> None:
     vault = files.vault_path("c1", root)
     assert (vault / "原始" / "01" / "隔离" / "bad.md").is_file()
     try:
-        files.promote_formal("c1", src, "01_违规", gate="G0", stage="01", cases_root=root)
+        files.promote_formal("c1", src, "01_商机卡", gate="G0", stage="01", cases_root=root)
     except ValueError as e:
         assert "banned" in str(e)
     else:
@@ -187,7 +187,9 @@ def test_promote_does_not_republish_prior_stage() -> None:
         },
     )
     _write(root / "c1" / "out" / "02_章程.md", "章程\n")
-    engine.decide(st, "G1", "APPROVE", actor="human", cases_root=root)
+    # P1-2: 关键门双签
+    for member, role in [("owner_a", "负责人"), ("owner_b", "GEO/验收专业复核")]:
+        engine.decide(st, "G1", "APPROVE", actor="human", cases_root=root, member=member, role=role)
     vault = files.vault_path("c1", root)
     opp = [d for d in files._docs(vault) if d["doc_id"] == "01_商机卡"]
     assert len(opp) == 1 and opp[0]["stage"] == "01" and opp[0]["rev"] == "1"
@@ -231,7 +233,17 @@ def test_rewind_invalidates_formal() -> None:
             }
         },
     )
-    engine.decide(st, "G1", "CHANGE", actor="human", rewind_to="01", cases_root=root)
+    engine.decide(st, "G1", "CHANGE", actor="human", rewind_to="01", cases_root=root, member="owner_a", role="负责人", change_payload={
+        "reason": "test change",
+        "affected_fields": [],
+        "affected_docs": ["01_商机卡"],
+        "evidence_affected": [],
+        "re_freeze_needed": False,
+        "re_budget_needed": False,
+        "re_comms_needed": False,
+        "invalidated": ["01_商机卡"],
+        "new_versions": {},
+    })
     vault = files.vault_path("c1", root)
     docs = [d for d in files._docs(vault) if d["doc_id"] == "01_商机卡"]
     assert docs and docs[0]["status"] == "invalidated"
@@ -250,6 +262,86 @@ def test_cli_board() -> None:
     assert run.main(["board", "c1", "--cases-root", str(root)]) == 0
 
 
+def test_csv_is_atomic_and_rejects_duplicate_keys() -> None:
+    root = _root()
+    engine.init_case("c1", root)
+    src = _write(root / "a.md", "客户原话\n")
+    files.deposit_raw("c1", src, "01", cases_root=root)
+    vault = files.vault_path("c1", root)
+    reg = vault / "原始" / "登记.csv"
+    assert not (vault / "原始" / "登记.csv.tmp").exists()
+    rows = files._read_csv(reg, files.RAW_FIELDS)
+    rows.append(dict(rows[0]))
+    try:
+        files._write_csv(reg, files.RAW_FIELDS, rows)
+    except ValueError as e:
+        assert "duplicate" in str(e)
+    else:
+        raise AssertionError("duplicate raw_id must fail")
+    assert files._read_csv(reg, files.RAW_FIELDS)[0]["raw_id"] == "R0001"
+
+
+def test_board_pair_and_check_vault() -> None:
+    root = _root()
+    engine.init_case("c1", root)
+    src = _write(root / "a.md", "客户原话\n")
+    files.deposit_raw("c1", src, "01", title="客户原话", cases_root=root)
+    files.promote_formal("c1", src, "01_商机卡", gate="G0", stage="01", cases_root=root)
+    vault = files.vault_path("c1", root)
+    assert (vault / "中转" / "看板.md").is_file()
+    assert (vault / "中转" / "board.json").is_file()
+    assert not (vault / "中转" / "看板.md.tmp").exists()
+    assert not (vault / "中转" / "board.json.tmp").exists()
+    report = files.check_vault("c1", cases_root=root)
+    assert report["ok"], report
+    assert report["catalog"]["raw"] == 1
+    assert "01_商机卡" in [d["doc_id"] for d in files._docs(vault) if d["status"] == "现行"]
+    assert run.main(["check-vault", "c1", "--cases-root", str(root)]) == 0
+
+
+def test_check_vault_detects_missing_raw_and_board_drift() -> None:
+    root = _root()
+    engine.init_case("c1", root)
+    src = _write(root / "a.md", "客户原话\n")
+    files.deposit_raw("c1", src, "01", cases_root=root)
+    vault = files.vault_path("c1", root)
+    live = vault / "原始" / "01" / src.name
+    live.unlink()
+    report = files.check_vault("c1", cases_root=root)
+    assert not report["ok"]
+    assert any(e.startswith("raw_missing:") for e in report["errors"])
+    extra = vault / "正式" / "现行" / "ghost.md"
+    extra.write_text("未登记\n", encoding="utf-8")
+    report2 = files.check_vault("c1", cases_root=root)
+    assert any(e.startswith("unregistered:") for e in report2["errors"])
+
+
+def _deposit_worker(case: str, path: str, root: str) -> None:
+    files.deposit_raw(case, path, "01", cases_root=Path(root))
+
+
+def test_concurrent_deposit_keeps_both_rows() -> None:
+    import multiprocessing
+
+    root = _root()
+    engine.init_case("c1", root)
+    a = _write(root / "a.md", "one\n")
+    b = _write(root / "b.md", "two\n")
+    ctx = multiprocessing.get_context("spawn")
+    p1 = ctx.Process(target=_deposit_worker, args=("c1", str(a), str(root)))
+    p2 = ctx.Process(target=_deposit_worker, args=("c1", str(b), str(root)))
+    p1.start()
+    p2.start()
+    p1.join(10)
+    p2.join(10)
+    assert p1.exitcode == 0 and p2.exitcode == 0
+    vault = files.vault_path("c1", root)
+    rows = files._read_csv(vault / "原始" / "登记.csv", files.RAW_FIELDS)
+    assert len(rows) == 2
+    assert {r["raw_id"] for r in rows} == {"R0001", "R0002"}
+    assert files.check_vault("c1", cases_root=root)["ok"]
+
+
 if __name__ == "__main__":
     test_init_builds_three_zones()
     test_deposit_and_promote_versions()
@@ -261,4 +353,8 @@ if __name__ == "__main__":
     test_promote_does_not_republish_prior_stage()
     test_rewind_invalidates_formal()
     test_cli_board()
+    test_csv_is_atomic_and_rejects_duplicate_keys()
+    test_board_pair_and_check_vault()
+    test_check_vault_detects_missing_raw_and_board_drift()
+    test_concurrent_deposit_keeps_both_rows()
     print("ok")

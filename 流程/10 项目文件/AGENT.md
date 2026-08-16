@@ -50,6 +50,7 @@ python3 agent_pm/run.py drop 本案 --src 路径 --from 操作员 --to 评分 --
 python3 agent_pm/run.py pick 本案 --item X0001 --member 评分
 python3 agent_pm/run.py ack 本案 --item X0001 --member 评分
 python3 agent_pm/run.py board 本案
+python3 agent_pm/run.py check-vault 本案
 ```
 
 ## 需要人做

@@ -17,3 +17,5 @@ agent_pm/cases/*/
 !agent_pm/cases/.gitkeep
 流程/10 项目文件/案件/*/
 !流程/10 项目文件/案件/README.md
+**/.write.lock
+**/*.tmp
