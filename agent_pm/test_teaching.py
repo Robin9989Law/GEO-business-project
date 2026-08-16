@@ -960,6 +960,44 @@ def test_cli_missing_qr_voids_before_resolve() -> None:
     )
 
 
+def test_cli_qr_moved_to_other_stage_must_rereview() -> None:
+    import shutil
+
+    import run
+
+    root = _root()
+    case = "qr-move"
+    assert run.main(["init", case, "--cases-root", str(root)]) == 0
+    pf = root / "p.json"
+    pf.write_text(json.dumps({"pm_level": 1, "geo_level": 1, "tool_level": 1}), encoding="utf-8")
+    assert run.main(["profile", case, "--member", "负责人", "--json", str(pf), "--cases-root", str(root)]) == 0
+    st0 = engine.load_state(case, root)
+    raw = _deposit(st0, root)
+    rf = root / "r.json"
+    rf.write_text(json.dumps({"quality": _quality(2), "confidence": 0.95, "raw_id": raw["raw_id"]}), encoding="utf-8")
+    assert run.main(["review", case, "--member", "负责人", "--raw-id", raw["raw_id"], "--json", str(rf), "--cases-root", str(root)]) == 0
+    st = engine.load_state(case, root)
+    assert st["review"]["current_result"] == "PASS"
+    rid = st["review"]["current_id"]
+    src = review.review_dir(case, "01", root) / f"{rid}.json"
+    dest_dir = review.review_dir(case, "02", root)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest_dir / f"{rid}.json"))
+    af = root / "a.json"
+    af.write_text(
+        json.dumps({"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}}),
+        encoding="utf-8",
+    )
+    assert run.main(["apply", case, "--json", str(af), "--cases-root", str(root)]) == 2
+    st2 = engine.load_state(case, root)
+    assert st2["review"]["current_result"] == ""
+    assert st2["activity"] == "rework_required"
+    shutil.move(str(dest_dir / f"{rid}.json"), str(src))
+    assert run.main(["apply", case, "--json", str(af), "--cases-root", str(root)]) == 2
+    assert run.main(["review", case, "--member", "负责人", "--raw-id", raw["raw_id"], "--json", str(rf), "--cases-root", str(root)]) == 0
+    assert run.main(["apply", case, "--json", str(af), "--cases-root", str(root)]) == 0
+
+
 def test_cli_profile_review() -> None:
     import run
 
@@ -1003,5 +1041,6 @@ if __name__ == "__main__":
     test_draft_path_no_fallback()
     test_cli_qr_tamper_cannot_soften_hard_fail()
     test_cli_missing_qr_voids_before_resolve()
+    test_cli_qr_moved_to_other_stage_must_rereview()
     test_cli_profile_review()
     print("ok")

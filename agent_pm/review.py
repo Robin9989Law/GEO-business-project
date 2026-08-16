@@ -834,15 +834,10 @@ def _draft_target_ok(state: dict, rec: dict, cases_root: Path | None) -> bool:
 
 
 def _find_qr_path(state: dict, review_id: str, cases_root: Path | None, files_root: Path | None) -> Path | None:
+    """当前评审只认 原始/{当前阶段}/评审/{current_id}.json，不跨阶段回退。"""
     stage = state.get("stage") or "01"
     p = review_dir(state["case_id"], stage, cases_root, files_root) / f"{review_id}.json"
-    if p.is_file():
-        return p
-    vault = files.vault_path(state["case_id"], cases_root, files_root)
-    for found in vault.glob(f"原始/*/评审/{review_id}.json"):
-        if found.is_file():
-            return found
-    return None
+    return p if p.is_file() else None
 
 
 def _validate_current_review_record(
