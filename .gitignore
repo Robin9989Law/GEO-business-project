@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+测量/
+**/.keep
+
+# 开单实例，不是模板
+agent_pm/cases/*/
+!agent_pm/cases/.gitkeep
+流程/10 项目文件/案件/*/
+!流程/10 项目文件/案件/README.md
