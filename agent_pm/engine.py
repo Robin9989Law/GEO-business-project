@@ -529,8 +529,10 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
     _rv.teaching.ensure_process(state)
     if state.get("activity") in _rv.BLOCK_APPLY:
         _fail("review blocks apply")
-    if _rv.review_engaged(state) and not _rv.stage_allows_apply(state):
-        _fail("review not passed")
+    if _rv.review_engaged(state):
+        _rv.validate_current_review_target(state, cases_root)
+        if not _rv.stage_allows_apply(state):
+            _fail("review not passed")
     if state["waiting"] != "agent":
         _fail(f"waiting on {state['waiting']}, not agent apply")
     stage = state["stage"]
@@ -698,8 +700,10 @@ def decide(
         import review as _rv
 
         _rv.teaching.ensure_process(state)
-        if _rv.review_engaged(state) and not _rv.stage_allows_apply(state):
-            _fail("review not passed")
+        if _rv.review_engaged(state):
+            _rv.validate_current_review_target(state, cases_root)
+            if not _rv.stage_allows_apply(state):
+                _fail("review not passed")
         miss = missing_required(state, cases_root=cases_root)
         if miss:
             _fail("missing required: " + ",".join(miss))

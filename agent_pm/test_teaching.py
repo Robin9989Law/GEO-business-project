@@ -590,6 +590,160 @@ def test_human_review_md_and_done_locked() -> None:
         raise AssertionError("done case must not accept review")
 
 
+def test_pass_then_tamper_blocks_apply_and_approve() -> None:
+    root = _root()
+    engine.init_case("pt1", root)
+    st = engine.load_state("pt1", root)
+    teaching.set_profile(st, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    src = _write(root / "ok.md", "客户想被发现。\n")
+    raw = files.deposit_raw("pt1", src, "01", cases_root=root)
+    review.submit_review(
+        st,
+        {"quality": _quality(2), "confidence": 0.95},
+        member="负责人",
+        raw_id=raw["raw_id"],
+        cases_root=root,
+    )
+    live = files.vault_path("pt1", root) / "原始" / "01" / src.name
+    live.write_text("保证推荐\n", encoding="utf-8")
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "stale" in str(e) or "review" in str(e)
+    else:
+        raise AssertionError("tampered raw after PASS must not apply")
+
+    engine.init_case("pt2", root)
+    st2 = engine.load_state("pt2", root)
+    teaching.set_profile(st2, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    src2 = _write(root / "ok2.md", "客户想被发现。\n")
+    raw2 = files.deposit_raw("pt2", src2, "01", cases_root=root)
+    review.submit_review(
+        st2,
+        {"quality": _quality(2), "confidence": 0.95},
+        member="负责人",
+        raw_id=raw2["raw_id"],
+        cases_root=root,
+    )
+    engine.apply_fields(
+        st2,
+        {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+        cases_root=root,
+    )
+    live2 = files.vault_path("pt2", root) / "原始" / "01" / src2.name
+    live2.write_text("保证推荐\n", encoding="utf-8")
+    try:
+        engine.decide(st2, "G0", "APPROVE", actor="human", cases_root=root)
+    except ValueError as e:
+        assert "stale" in str(e) or "review" in str(e)
+    else:
+        raise AssertionError("tampered raw after PASS must not APPROVE")
+    assert st2["stage"] == "01"
+
+
+def test_draft_pass_then_tamper_blocks_apply_and_approve() -> None:
+    import hashlib
+
+    root = _root()
+    engine.init_case("dt1", root)
+    st = engine.load_state("dt1", root)
+    teaching.set_profile(st, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    draft = _write(root / "dt1" / "out" / "01_草稿.md", "商机草稿，无禁售。\n")
+    ck = hashlib.sha256(draft.read_bytes()).hexdigest()
+    rec = review.submit_review(
+        st,
+        {"quality": _quality(2), "confidence": 0.95, "draft_id": "01_草稿", "draft_checksum": ck},
+        member="负责人",
+        cases_root=root,
+    )
+    assert rec["result"] == "PASS"
+    assert rec.get("draft_path") == "out/01_草稿.md"
+    draft.write_text("保证推荐\n", encoding="utf-8")
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "stale" in str(e) or "review" in str(e)
+    else:
+        raise AssertionError("tampered draft after PASS must not apply")
+
+    engine.init_case("dt2", root)
+    st2 = engine.load_state("dt2", root)
+    teaching.set_profile(st2, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    draft2 = _write(root / "dt2" / "out" / "01_草稿.md", "商机草稿，无禁售。\n")
+    ck2 = hashlib.sha256(draft2.read_bytes()).hexdigest()
+    review.submit_review(
+        st2,
+        {"quality": _quality(2), "confidence": 0.95, "draft_id": "01_草稿", "draft_checksum": ck2},
+        member="负责人",
+        cases_root=root,
+    )
+    engine.apply_fields(
+        st2,
+        {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+        cases_root=root,
+    )
+    draft2.write_text("保证推荐\n", encoding="utf-8")
+    try:
+        engine.decide(st2, "G0", "APPROVE", actor="human", cases_root=root)
+    except ValueError as e:
+        assert "stale" in str(e) or "review" in str(e)
+    else:
+        raise AssertionError("tampered draft after PASS must not APPROVE")
+    assert st2["stage"] == "01"
+
+
+def test_stage01_cannot_review_out02() -> None:
+    import hashlib
+
+    root = _root()
+    engine.init_case("x02", root)
+    st = engine.load_state("x02", root)
+    teaching.set_profile(st, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    draft = _write(root / "x02" / "out" / "02" / "需求草稿.md", "商机草稿，无禁售。\n")
+    ck = hashlib.sha256(draft.read_bytes()).hexdigest()
+    rec = review.submit_review(
+        st,
+        {"quality": _quality(2), "confidence": 0.95, "draft_id": "需求草稿", "draft_checksum": ck},
+        member="负责人",
+        cases_root=root,
+    )
+    assert rec["result"] != "PASS"
+    rec2 = review.submit_review(
+        st,
+        {"quality": _quality(2), "confidence": 0.95, "draft_id": "out/02/需求草稿.md", "draft_checksum": ck},
+        member="负责人",
+        cases_root=root,
+    )
+    assert rec2["result"] != "PASS"
+
+
+def test_formal_current_cannot_be_draft() -> None:
+    import hashlib
+
+    root = _root()
+    engine.init_case("fm1", root)
+    st = engine.load_state("fm1", root)
+    teaching.set_profile(st, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    vault = files.init_vault("fm1", root)
+    formal = _write(vault / "正式" / "现行" / "已正式.md", "已过门正文，无禁售。\n")
+    ck = hashlib.sha256(formal.read_bytes()).hexdigest()
+    rec = review.submit_review(
+        st,
+        {"quality": _quality(2), "confidence": 0.95, "draft_id": "已正式", "draft_checksum": ck},
+        member="负责人",
+        cases_root=root,
+    )
+    assert rec["result"] != "PASS"
+
+
 def test_cli_profile_review() -> None:
     import run
 
@@ -624,5 +778,9 @@ if __name__ == "__main__":
     test_raw_tampered_is_hard_fail()
     test_pass_then_two_fails_not_coaching()
     test_human_review_md_and_done_locked()
+    test_pass_then_tamper_blocks_apply_and_approve()
+    test_draft_pass_then_tamper_blocks_apply_and_approve()
+    test_stage01_cannot_review_out02()
+    test_formal_current_cannot_be_draft()
     test_cli_profile_review()
     print("ok")

@@ -131,21 +131,82 @@ def _load_raw(
     return row, text, live, tampered
 
 
-def _find_draft_path(case_id: str, draft_id: str, cases_root: Path | None, files_root: Path | None) -> Path | None:
+def _out_roots(case_id: str, cases_root: Path | None) -> list[Path]:
+    roots: list[Path] = []
+    if cases_root is not None:
+        roots.append(Path(cases_root) / case_id / "out")
+    default = engine.DEFAULT_CASES / case_id / "out"
+    if default not in roots:
+        roots.append(default)
+    return roots
+
+
+def _draft_allowed(path: Path, out_root: Path, stage: str) -> bool:
+    try:
+        rel = path.resolve().relative_to(out_root.resolve())
+    except ValueError:
+        return False
+    parts = rel.parts
+    if not parts:
+        return False
+    if parts[0] == stage:
+        return True
+    return parts[0].startswith(f"{stage}_")
+
+
+def _canonical_draft_rel(path: Path, out_root: Path) -> str:
+    rel = path.resolve().relative_to(out_root.resolve())
+    return f"out/{rel.as_posix()}"
+
+
+def _find_draft_path(
+    case_id: str,
+    draft_id: str,
+    stage: str,
+    cases_root: Path | None,
+    files_root: Path | None = None,
+) -> Path | None:
+    if not draft_id or not stage:
+        return None
+    declared = str(draft_id).replace("\\", "/").lstrip("./")
     names = {draft_id, Path(draft_id).name}
     stems = {Path(draft_id).stem}
-    dirs: list[Path] = []
-    if cases_root is not None:
-        dirs.append(Path(cases_root) / case_id / "out")
-    dirs.append(engine.DEFAULT_CASES / case_id / "out")
-    vault = files.vault_path(case_id, cases_root, files_root)
-    dirs.append(vault / "正式" / "现行")
-    for d in dirs:
-        if not d.is_dir():
+    for out_root in _out_roots(case_id, cases_root):
+        if not out_root.is_dir():
             continue
-        for p in d.rglob("*"):
-            if p.is_file() and (p.name in names or p.stem in stems):
+        if declared.startswith("out/"):
+            cand = out_root / declared[4:]
+            if cand.is_file() and _draft_allowed(cand, out_root, stage):
+                return cand
+            continue
+        candidates: list[Path] = []
+        staged = out_root / stage
+        if staged.is_dir():
+            candidates.extend(p for p in staged.rglob("*") if p.is_file())
+        for p in out_root.iterdir():
+            if not p.name.startswith(f"{stage}_"):
+                continue
+            if p.is_file():
+                candidates.append(p)
+            elif p.is_dir():
+                candidates.extend(q for q in p.rglob("*") if q.is_file())
+        for p in candidates:
+            if p.name in names or p.stem in stems:
                 return p
+    return None
+
+
+def _resolve_saved_draft_path(
+    case_id: str, draft_path: str, stage: str, cases_root: Path | None
+) -> Path | None:
+    rel = str(draft_path or "").replace("\\", "/").lstrip("/")
+    if not rel.startswith("out/"):
+        return None
+    rest = rel[4:]
+    for out_root in _out_roots(case_id, cases_root):
+        cand = out_root / rest
+        if cand.is_file() and _draft_allowed(cand, out_root, stage):
+            return cand
     return None
 
 
@@ -153,13 +214,25 @@ def _load_draft(
     case_id: str,
     draft_id: str,
     checksum: str,
+    stage: str,
     cases_root: Path | None,
     files_root: Path | None,
 ) -> tuple[dict | None, str, str, bool]:
     if not draft_id or not checksum:
         return None, "", "", False
-    path = _find_draft_path(case_id, draft_id, cases_root, files_root)
+    path = _find_draft_path(case_id, draft_id, stage, cases_root, files_root)
     if path is None:
+        return None, "", "", False
+    out_root = None
+    resolved = path.resolve()
+    for root in _out_roots(case_id, cases_root):
+        try:
+            resolved.relative_to(root.resolve())
+        except ValueError:
+            continue
+        out_root = root
+        break
+    if out_root is None:
         return None, "", "", False
     data = path.read_bytes()
     live = _sha(data)
@@ -167,7 +240,13 @@ def _load_draft(
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         text = path.read_text(encoding="utf-8", errors="replace")
-    row = {"draft_id": draft_id, "filename": path.name, "kind": "draft"}
+    row = {
+        "draft_id": draft_id,
+        "draft_path": _canonical_draft_rel(path, out_root),
+        "filename": path.name,
+        "kind": "draft",
+        "stage": stage,
+    }
     return row, text, live, live != checksum
 
 
@@ -275,15 +354,20 @@ def hard_rule_failures(
             )
         )
 
-    if raw_row and raw_row.get("raw_id"):
+    if raw_row and (raw_row.get("raw_id") or raw_row.get("draft_id")):
         raw_stage = raw_row.get("stage") or ""
         if raw_stage and raw_stage != stage:
+            hint = (
+                f"把文件存到 原始/{stage}/ 或当前 inbox/{stage}/"
+                if raw_row.get("raw_id")
+                else f"草稿只能在 out/{stage}/ 或 out/{stage}_*"
+            )
             fails.append(
                 _fail_item(
                     state,
                     "material_path",
                     f"材料属于 {raw_stage}，当前是 {stage}",
-                    f"把文件存到 原始/{stage}/ 或当前 inbox/{stage}/",
+                    hint,
                     raw_row,
                 )
             )
@@ -442,7 +526,9 @@ def _resolve_target(
         missing = row is None
         return row, text, digest, tampered, raw_id, "raw" if not missing else "raw"
     if draft_id:
-        row, text, digest, tampered = _load_draft(state["case_id"], draft_id, draft_ck, cases_root, files_root)
+        row, text, digest, tampered = _load_draft(
+            state["case_id"], draft_id, draft_ck, state["stage"], cases_root, files_root
+        )
         return row, text, digest, tampered, draft_id, "draft"
     return None, "", "", False, "", ""
 
@@ -517,6 +603,7 @@ def submit_review(
         "target_kind": target_kind,
         "raw_id": (raw_row or {}).get("raw_id") or "",
         "draft_id": (raw_row or {}).get("draft_id") or "",
+        "draft_path": (raw_row or {}).get("draft_path") or "",
         "input_checksum": digest,
         "claimed_result": claimed or "",
         "result": result,
@@ -641,6 +728,7 @@ def resolve_review(
         engine._fail("resolve-review needs reason")
     rec = _read_review(state, review_id, cases_root, files_root)
     _lock_current(state, rec, review_id, expected_current_id, expected_checksum)
+    validate_current_review_target(state, cases_root, files_root)
     if rec.get("hard_fails") and verdict == "OVERRIDE_SOFT":
         engine._fail("hard rules cannot be overridden")
     resolution = {"verdict": verdict, "actor": actor, "reason": reason.strip(), "at": engine.now()}
@@ -680,6 +768,75 @@ def _review_path(state: dict, review_id: str, cases_root: Path | None, files_roo
 
 def _read_review(state: dict, review_id: str, cases_root: Path | None, files_root: Path | None) -> dict:
     return json.loads(_review_path(state, review_id, cases_root, files_root).read_text(encoding="utf-8"))
+
+
+def _void_current_review(state: dict, why: str) -> None:
+    teaching.ensure_process(state)
+    rid = (state.get("review") or {}).get("current_id") or ""
+    state["review"]["current_result"] = ""
+    state["review"]["current_checksum"] = ""
+    state["activity"] = "rework_required"
+    state["waiting"] = "agent"
+    state["log"].append({"at": engine.now(), "op": "review_void", "id": rid, "why": why})
+
+
+def _live_target_checksum(
+    state: dict, rec: dict, cases_root: Path | None, files_root: Path | None
+) -> str:
+    raw_id = str(rec.get("raw_id") or "").strip()
+    if raw_id:
+        _row, _text, live, _tampered = _load_raw(state["case_id"], raw_id, cases_root, files_root)
+        return live
+    draft_path = str(rec.get("draft_path") or "").strip()
+    stage = str(rec.get("stage") or state.get("stage") or "")
+    path = None
+    if draft_path:
+        path = _resolve_saved_draft_path(state["case_id"], draft_path, stage, cases_root)
+    if path is None:
+        draft_id = str(rec.get("draft_id") or "").strip()
+        if draft_id:
+            path = _find_draft_path(state["case_id"], draft_id, stage, cases_root, files_root)
+    if path is None or not path.is_file():
+        return ""
+    return _sha(path.read_bytes())
+
+
+def validate_current_review_target(
+    state: dict,
+    cases_root: Path | None = None,
+    files_root: Path | None = None,
+) -> None:
+    """apply / APPROVE / resolve-review 前重读 QR 与材料。不一致则作废并要求重审。"""
+    teaching.ensure_process(state)
+    if not review_engaged(state):
+        return
+    rev = state["review"]
+    rid = str(rev.get("current_id") or "").strip()
+    if not rid:
+        return
+    need_live = rev.get("current_result") in SOFT_OK or state.get("activity") == "appeal_pending"
+    if not need_live:
+        return
+    try:
+        rec = _read_review(state, rid, cases_root, files_root)
+    except Exception:
+        _void_current_review(state, "review record missing")
+        engine._fail("review target stale")
+    if rec.get("case_id") != state.get("case_id"):
+        _void_current_review(state, "review case mismatch")
+        engine._fail("review target stale")
+    if rec.get("stage") != state.get("stage"):
+        _void_current_review(state, "review stage mismatch")
+        engine._fail("review target stale")
+    if rec.get("review_id") != rid:
+        _void_current_review(state, "review id mismatch")
+        engine._fail("review target stale")
+    stored = str(rec.get("input_checksum") or "").strip()
+    state_ck = str(rev.get("current_checksum") or "").strip()
+    live = _live_target_checksum(state, rec, cases_root, files_root)
+    if not stored or not live or live != stored or stored != state_ck:
+        _void_current_review(state, "review checksum mismatch")
+        engine._fail("review target stale")
 
 
 def reset_stage_review(state: dict) -> None:
