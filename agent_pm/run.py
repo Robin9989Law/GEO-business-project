@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     root = _root(args)
     froot = _files_root(args)
+    state = None
     try:
         if args.cmd == "init":
             _print(engine.init_case(args.case_id, root))
@@ -250,6 +251,11 @@ def main(argv: list[str] | None = None) -> int:
             engine.save_state(state, root)
             _print(engine.next_action(state))
             return 0
+    except review.ReviewTargetStale as e:
+        if state is not None:
+            engine.save_state(state, root)
+        print(str(e), file=sys.stderr)
+        return 2
     except (ValueError, FileNotFoundError, FileExistsError) as e:
         print(str(e), file=sys.stderr)
         return 2

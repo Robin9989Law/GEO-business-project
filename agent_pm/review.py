@@ -28,6 +28,10 @@ APPEAL_OK = frozenset({"rework_required"})
 RESOLVE_OK = frozenset({"appeal_pending"})
 
 
+class ReviewTargetStale(ValueError):
+    """材料已偏离当前 QR，评审已作废，必须重审。"""
+
+
 def review_engaged(state: dict) -> bool:
     teaching.ensure_process(state)
     if state.get("profiles"):
@@ -780,25 +784,47 @@ def _void_current_review(state: dict, why: str) -> None:
     state["log"].append({"at": engine.now(), "op": "review_void", "id": rid, "why": why})
 
 
-def _live_target_checksum(
-    state: dict, rec: dict, cases_root: Path | None, files_root: Path | None
-) -> str:
+def _stale(state: dict, why: str) -> None:
+    _void_current_review(state, why)
+    raise ReviewTargetStale("review target stale")
+
+
+def _raw_target_ok(state: dict, rec: dict, cases_root: Path | None, files_root: Path | None) -> bool:
     raw_id = str(rec.get("raw_id") or "").strip()
-    if raw_id:
-        _row, _text, live, _tampered = _load_raw(state["case_id"], raw_id, cases_root, files_root)
-        return live
+    if not raw_id:
+        return False
+    row, _text, live, tampered = _load_raw(state["case_id"], raw_id, cases_root, files_root)
+    if row is None:
+        return False
+    if str(row.get("raw_id") or "").strip() != raw_id:
+        return False
+    qr_stage = str(rec.get("stage") or "").strip()
+    cur_stage = str(state.get("stage") or "").strip()
+    row_stage = str(row.get("stage") or "").strip()
+    if not row_stage or row_stage != qr_stage or row_stage != cur_stage:
+        return False
+    registered = str(row.get("checksum") or "").strip()
+    stored = str(rec.get("input_checksum") or "").strip()
+    state_ck = str((state.get("review") or {}).get("current_checksum") or "").strip()
+    if tampered or not registered or not live or not stored:
+        return False
+    return registered == live == stored == state_ck
+
+
+def _draft_target_ok(state: dict, rec: dict, cases_root: Path | None) -> bool:
     draft_path = str(rec.get("draft_path") or "").strip()
+    if not draft_path:
+        return False
     stage = str(rec.get("stage") or state.get("stage") or "")
-    path = None
-    if draft_path:
-        path = _resolve_saved_draft_path(state["case_id"], draft_path, stage, cases_root)
-    if path is None:
-        draft_id = str(rec.get("draft_id") or "").strip()
-        if draft_id:
-            path = _find_draft_path(state["case_id"], draft_id, stage, cases_root, files_root)
+    path = _resolve_saved_draft_path(state["case_id"], draft_path, stage, cases_root)
     if path is None or not path.is_file():
-        return ""
-    return _sha(path.read_bytes())
+        return False
+    live = _sha(path.read_bytes())
+    stored = str(rec.get("input_checksum") or "").strip()
+    state_ck = str((state.get("review") or {}).get("current_checksum") or "").strip()
+    if not live or not stored:
+        return False
+    return live == stored == state_ck
 
 
 def validate_current_review_target(
@@ -820,23 +846,22 @@ def validate_current_review_target(
     try:
         rec = _read_review(state, rid, cases_root, files_root)
     except Exception:
-        _void_current_review(state, "review record missing")
-        engine._fail("review target stale")
+        _stale(state, "review record missing")
     if rec.get("case_id") != state.get("case_id"):
-        _void_current_review(state, "review case mismatch")
-        engine._fail("review target stale")
+        _stale(state, "review case mismatch")
     if rec.get("stage") != state.get("stage"):
-        _void_current_review(state, "review stage mismatch")
-        engine._fail("review target stale")
+        _stale(state, "review stage mismatch")
     if rec.get("review_id") != rid:
-        _void_current_review(state, "review id mismatch")
-        engine._fail("review target stale")
-    stored = str(rec.get("input_checksum") or "").strip()
-    state_ck = str(rev.get("current_checksum") or "").strip()
-    live = _live_target_checksum(state, rec, cases_root, files_root)
-    if not stored or not live or live != stored or stored != state_ck:
-        _void_current_review(state, "review checksum mismatch")
-        engine._fail("review target stale")
+        _stale(state, "review id mismatch")
+    if rec.get("raw_id"):
+        if not _raw_target_ok(state, rec, cases_root, files_root):
+            _stale(state, "review raw target mismatch")
+        return
+    if rec.get("draft_id") or rec.get("draft_path"):
+        if not _draft_target_ok(state, rec, cases_root):
+            _stale(state, "review draft target mismatch")
+        return
+    _stale(state, "review target missing")
 
 
 def reset_stage_review(state: dict) -> None:

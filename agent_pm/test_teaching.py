@@ -744,6 +744,130 @@ def test_formal_current_cannot_be_draft() -> None:
     assert rec["result"] != "PASS"
 
 
+def test_cli_void_review_persists_and_requires_rereview() -> None:
+    import run
+
+    root = _root()
+    case = "cli-void"
+    assert run.main(["init", case, "--cases-root", str(root)]) == 0
+    pf = root / "p.json"
+    pf.write_text(json.dumps({"pm_level": 1, "geo_level": 1, "tool_level": 1}), encoding="utf-8")
+    assert run.main(["profile", case, "--member", "负责人", "--json", str(pf), "--cases-root", str(root)]) == 0
+    st0 = engine.load_state(case, root)
+    raw = _deposit(st0, root)
+    live = files.vault_path(case, root) / "原始" / "01" / raw["filename"]
+    original = live.read_text(encoding="utf-8")
+    rf = root / "r.json"
+    rf.write_text(json.dumps({"quality": _quality(2), "confidence": 0.95, "raw_id": raw["raw_id"]}), encoding="utf-8")
+    assert run.main(["review", case, "--member", "负责人", "--raw-id", raw["raw_id"], "--json", str(rf), "--cases-root", str(root)]) == 0
+    af = root / "a.json"
+    af.write_text(
+        json.dumps({"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}}),
+        encoding="utf-8",
+    )
+    live.write_text("保证推荐\n", encoding="utf-8")
+    assert run.main(["apply", case, "--json", str(af), "--cases-root", str(root)]) == 2
+    st = engine.load_state(case, root)
+    assert st["review"]["current_result"] == ""
+    assert st["activity"] == "rework_required"
+    live.write_text(original, encoding="utf-8")
+    assert run.main(["apply", case, "--json", str(af), "--cases-root", str(root)]) == 2
+    assert run.main(["review", case, "--member", "负责人", "--raw-id", raw["raw_id"], "--json", str(rf), "--cases-root", str(root)]) == 0
+    assert run.main(["apply", case, "--json", str(af), "--cases-root", str(root)]) == 0
+    st2 = engine.load_state(case, root)
+    assert st2["waiting"] == "human"
+
+
+def test_raw_registry_tamper_blocks_apply() -> None:
+    root = _root()
+    engine.init_case("reg1", root)
+    st = engine.load_state("reg1", root)
+    teaching.set_profile(st, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    raw = _deposit(st, root)
+    review.submit_review(
+        st,
+        {"quality": _quality(2), "confidence": 0.95},
+        member="负责人",
+        raw_id=raw["raw_id"],
+        cases_root=root,
+    )
+    vault = files.vault_path("reg1", root)
+    rows = files._read_csv(vault / "原始" / "登记.csv", files.RAW_FIELDS)
+    rows[0]["checksum"] = "0" * 64
+    files._write_csv(vault / "原始" / "登记.csv", files.RAW_FIELDS, rows)
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+            cases_root=root,
+        )
+    except review.ReviewTargetStale:
+        pass
+    else:
+        raise AssertionError("registry checksum edit must block apply")
+
+    engine.init_case("reg2", root)
+    st2 = engine.load_state("reg2", root)
+    teaching.set_profile(st2, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    raw2 = _deposit(st2, root)
+    review.submit_review(
+        st2,
+        {"quality": _quality(2), "confidence": 0.95},
+        member="负责人",
+        raw_id=raw2["raw_id"],
+        cases_root=root,
+    )
+    vault2 = files.vault_path("reg2", root)
+    src = vault2 / "原始" / "01" / raw2["filename"]
+    dest_dir = vault2 / "原始" / "02"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    src.replace(dest_dir / raw2["filename"])
+    rows2 = files._read_csv(vault2 / "原始" / "登记.csv", files.RAW_FIELDS)
+    rows2[0]["stage"] = "02"
+    files._write_csv(vault2 / "原始" / "登记.csv", files.RAW_FIELDS, rows2)
+    try:
+        engine.apply_fields(
+            st2,
+            {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+            cases_root=root,
+        )
+    except review.ReviewTargetStale:
+        pass
+    else:
+        raise AssertionError("registry stage move must block apply")
+
+
+def test_draft_path_no_fallback() -> None:
+    import hashlib
+
+    root = _root()
+    engine.init_case("dp1", root)
+    st = engine.load_state("dp1", root)
+    teaching.set_profile(st, "负责人", {"pm_level": 1, "geo_level": 1, "tool_level": 1})
+    draft = _write(root / "dp1" / "out" / "01_草稿.md", "商机草稿，无禁售。\n")
+    ck = hashlib.sha256(draft.read_bytes()).hexdigest()
+    rec = review.submit_review(
+        st,
+        {"quality": _quality(2), "confidence": 0.95, "draft_id": "01_草稿", "draft_checksum": ck},
+        member="负责人",
+        cases_root=root,
+    )
+    assert rec.get("draft_path") == "out/01_草稿.md"
+    text = draft.read_text(encoding="utf-8")
+    draft.unlink()
+    _write(root / "dp1" / "out" / "01_alt" / "01_草稿.md", text)
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+            cases_root=root,
+        )
+    except review.ReviewTargetStale:
+        pass
+    else:
+        raise AssertionError("missing draft_path must not fall back to draft_id")
+
+
 def test_cli_profile_review() -> None:
     import run
 
@@ -782,5 +906,8 @@ if __name__ == "__main__":
     test_draft_pass_then_tamper_blocks_apply_and_approve()
     test_stage01_cannot_review_out02()
     test_formal_current_cannot_be_draft()
+    test_cli_void_review_persists_and_requires_rereview()
+    test_raw_registry_tamper_blocks_apply()
+    test_draft_path_no_fallback()
     test_cli_profile_review()
     print("ok")
