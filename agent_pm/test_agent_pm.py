@@ -131,6 +131,7 @@ def _lock_07_08(st: dict, sop: str = "诊断") -> None:
                 "stakeholder_decision": "客户决策人",
                 "comms_cadence": "每周",
                 "comms_bound": "不得宽于四选一",
+                "comms_api_not_primary": "是",
             }
         },
     )
@@ -278,7 +279,7 @@ def test_diagnosis_blocks_intervention_and_verdict() -> None:
         engine.apply_fields(st, {"windows": ["intervention", "noise"]})
     except ValueError as e:
         assert "windows" in str(e)
-    engine.apply_fields(st, {"windows": ["noise", "baseline"]})
+    engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     try:
         engine.apply_fields(st, {"fields": {"intervention_class": "FAQ"}})
@@ -290,7 +291,17 @@ def test_diagnosis_blocks_intervention_and_verdict() -> None:
         engine.apply_fields(st, {"fields": {"verdict_4": "受控前后描述"}})
     except ValueError as e:
         assert "verdict_4" in str(e)
-    engine.apply_fields(st, {"fields": {"verdict_4": "描述基线"}})
+    engine.apply_fields(
+        st,
+        {
+            "fields": {
+                "verdict_4": "描述基线",
+                "delivery_manifest_checksum": "abc123",
+                "freeze_match": "是",
+                "delivery_accepted": "是",
+            }
+        },
+    )
     nxt = engine.next_action(st)
     assert nxt["waiting"] == "human" and nxt["gate"] == "G4"
     engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
@@ -302,7 +313,16 @@ def test_diagnosis_blocks_intervention_and_verdict() -> None:
         assert "assets" in str(e)
     engine.apply_fields(
         st,
-        {"fields": {"close_assets_ok": "是", "close_no_reopen_l1": "是", "verdict_4": "描述基线"}},
+        {
+            "fields": {
+                "close_assets_ok": "是",
+                "close_no_reopen_l1": "是",
+                "close_manifest_ok": "是",
+                "close_board_empty": "是",
+                "close_archive_ok": "是",
+                "verdict_4": "描述基线",
+            }
+        },
     )
     engine.decide(st, "G8", "APPROVE", actor="human", cases_root=root)
     assert engine.next_action(st)["waiting"] == "done"
@@ -459,7 +479,7 @@ def _to_sprint_g5(root: Path, case: str) -> dict:
     _lock_07_08(st, "冲刺")
     _apply03(st, root)
     engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
-    engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"]})
+    engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     return st
 
@@ -601,7 +621,7 @@ def test_invalidated_evidence_cannot_l1() -> None:
     try:
         engine.apply_fields(
             st,
-            {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1"}},
+            {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1", "intervention_need_ids": "N01", "holdout_untouched": "是", "intervention_completed_on": "2026-08-01", "wait_days": "7"}},
             cases_root=root,
         )
     except ValueError as e:
@@ -651,12 +671,12 @@ def test_change_then_fresh_output_can_l1() -> None:
     _lock_07_08(st, "冲刺")
     _apply03(st, root)
     engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
-    engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"]})
+    engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     out = _write_signed_evidence(root, st)
     engine.apply_fields(
         st,
-        {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1"}},
+        {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1", "intervention_need_ids": "N01", "holdout_untouched": "是", "intervention_completed_on": "2026-08-01", "wait_days": "7"}},
         cases_root=root,
     )
     assert st["waiting"] == "human"
@@ -665,7 +685,7 @@ def test_change_then_fresh_output_can_l1() -> None:
     try:
         engine.apply_fields(
             st,
-            {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1"}},
+            {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1", "intervention_need_ids": "N01", "holdout_untouched": "是", "intervention_completed_on": "2026-08-01", "wait_days": "7"}},
             cases_root=root,
         )
     except ValueError as e:
@@ -676,7 +696,7 @@ def test_change_then_fresh_output_can_l1() -> None:
     assert not (out / "INVALIDATED.txt").exists()
     engine.apply_fields(
         st,
-        {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1"}},
+        {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1", "intervention_need_ids": "N01", "holdout_untouched": "是", "intervention_completed_on": "2026-08-01", "wait_days": "7"}},
         cases_root=root,
     )
     assert st["waiting"] == "human"
@@ -724,14 +744,14 @@ def test_change_then_partial_output_cannot_lift() -> None:
     _lock_07_08(st, "冲刺")
     _apply03(st, root)
     engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
-    engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"]})
+    engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     out = _write_signed_evidence(root, st)
     old_did = (out / "did.csv").read_bytes()
     old_cov = (out / "coverage.csv").read_bytes()
     engine.apply_fields(
         st,
-        {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1"}},
+        {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1", "intervention_need_ids": "N01", "holdout_untouched": "是", "intervention_completed_on": "2026-08-01", "wait_days": "7"}},
         cases_root=root,
     )
     assert st["waiting"] == "human"
@@ -793,7 +813,7 @@ def test_change_then_partial_output_cannot_lift() -> None:
     try:
         engine.apply_fields(
             st,
-            {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1"}},
+            {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1", "intervention_need_ids": "N01", "holdout_untouched": "是", "intervention_completed_on": "2026-08-01", "wait_days": "7"}},
             cases_root=root,
         )
     except ValueError as e:
@@ -854,7 +874,7 @@ def test_contradictory_did_cannot_l1() -> None:
     try:
         engine.apply_fields(
             st,
-            {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1"}},
+            {"fields": {"intervention_class": "FAQ", "verdict_4": "确认性 L1", "intervention_need_ids": "N01", "holdout_untouched": "是", "intervention_completed_on": "2026-08-01", "wait_days": "7"}},
             cases_root=root,
         )
     except ValueError as e:
@@ -871,7 +891,7 @@ def test_l1_without_did_csv_fails() -> None:
     _lock_07_08(st, "冲刺")
     _apply03(st, root)
     engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
-    engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"]})
+    engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     try:
         engine.apply_fields(
@@ -880,6 +900,10 @@ def test_l1_without_did_csv_fails() -> None:
                 "fields": {
                     "intervention_class": "FAQ",
                     "verdict_4": "确认性 L1",
+                    "intervention_need_ids": "N01",
+                    "holdout_untouched": "是",
+                    "intervention_completed_on": "2026-08-01",
+                    "wait_days": "7",
                     "did_excludes_zero": "是",
                     "did_positive": "是",
                     "treat_clusters": "2",
@@ -893,6 +917,201 @@ def test_l1_without_did_csv_fails() -> None:
         assert "did.csv" in str(e)
     else:
         raise AssertionError("L1 without did.csv must fail")
+
+
+def test_need_overlap_blocked() -> None:
+    root = _root()
+    engine.init_case("ov1", root)
+    st = engine.load_state("ov1", root)
+    engine.apply_fields(
+        st,
+        {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+    )
+    engine.decide(st, "G0", "APPROVE", actor="human")
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "project_id": "P3",
+                    "owner": "编排",
+                    "sop_stage": "诊断",
+                    "primary_goal": "在无品牌发现问上提高被正确提及的概率",
+                    "primary_endpoint": "p_mention",
+                    "causal_claim": "descriptive_until_isolation",
+                    "control_design": "监测组",
+                    "success_rule_diagnosis": "描述基线",
+                    "success_rule_sprint": "受控前后描述",
+                    "success_rule_retain": "不能下结论",
+                    "treat_need_ids": "N01;H01",
+                    "holdout_need_ids": "H01",
+                    "platforms_required": "P0",
+                }
+            },
+        )
+    except ValueError as e:
+        assert "disjoint" in str(e) or "need" in str(e)
+    else:
+        raise AssertionError("overlapping needs must fail")
+
+
+def test_plan_hours_cannot_exceed_budget() -> None:
+    root = _root()
+    engine.init_case("ph1", root)
+    st = engine.load_state("ph1", root)
+    _lock_01_02(st, "诊断")
+    _lock_07_08(st, "诊断")
+    _apply03(st, root)
+    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    try:
+        engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "99"}})
+    except ValueError as e:
+        assert "plan_hours" in str(e) or "budget" in str(e)
+    else:
+        raise AssertionError("over-budget plan must fail")
+
+
+def test_comms_api_primary_blocked() -> None:
+    root = _root()
+    engine.init_case("api1", root)
+    st = engine.load_state("api1", root)
+    _lock_01_02(st, "诊断")
+    engine.apply_fields(
+        st,
+        {"fields": {"budget_hours": "12", "budget_scope": "冻结+噪声+基线+抽检", "quote_excludes_l1": "是"}},
+    )
+    engine.decide(st, "G6", "APPROVE", actor="human")
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "stakeholder_decision": "客户决策人",
+                    "comms_cadence": "每周",
+                    "comms_bound": "不得宽于四选一",
+                    "comms_api_not_primary": "否",
+                }
+            },
+        )
+    except ValueError as e:
+        assert "API" in str(e)
+    else:
+        raise AssertionError("API-as-primary must fail")
+
+
+def test_holdout_touched_and_foreign_need_blocked() -> None:
+    root = _root()
+    st = _to_sprint_g5(root, "ht1")
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "intervention_class": "FAQ",
+                    "verdict_4": "受控前后描述",
+                    "intervention_need_ids": "N99",
+                    "holdout_untouched": "是",
+                    "intervention_completed_on": "2026-08-01",
+                    "wait_days": "7",
+                }
+            },
+        )
+    except ValueError as e:
+        assert "treat" in str(e) or "need" in str(e)
+    else:
+        raise AssertionError("foreign intervention need must fail")
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "intervention_class": "FAQ",
+                    "verdict_4": "受控前后描述",
+                    "intervention_need_ids": "N01",
+                    "holdout_untouched": "否",
+                    "intervention_completed_on": "2026-08-01",
+                    "wait_days": "7",
+                }
+            },
+        )
+    except ValueError as e:
+        assert "holdout" in str(e)
+    else:
+        raise AssertionError("touched holdout must fail")
+
+
+def test_unaccepted_delivery_cannot_close() -> None:
+    root = _root()
+    engine.init_case("ua1", root)
+    st = engine.load_state("ua1", root)
+    _lock_01_02(st, "诊断")
+    _lock_07_08(st, "诊断")
+    _apply03(st, root)
+    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
+    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
+    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "verdict_4": "描述基线",
+                    "delivery_manifest_checksum": "abc",
+                    "freeze_match": "是",
+                    "delivery_accepted": "否",
+                }
+            },
+        )
+    except ValueError as e:
+        assert "accepted" in str(e) or "delivery" in str(e)
+    else:
+        raise AssertionError("unaccepted delivery must fail")
+
+
+def test_close_cannot_reopen_l1() -> None:
+    root = _root()
+    engine.init_case("cl1", root)
+    st = engine.load_state("cl1", root)
+    _lock_01_02(st, "诊断")
+    _lock_07_08(st, "诊断")
+    _apply03(st, root)
+    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
+    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
+    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(
+        st,
+        {
+            "fields": {
+                "verdict_4": "描述基线",
+                "delivery_manifest_checksum": "abc",
+                "freeze_match": "是",
+                "delivery_accepted": "是",
+            }
+        },
+    )
+    engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "close_assets_ok": "是",
+                    "close_no_reopen_l1": "是",
+                    "close_manifest_ok": "是",
+                    "close_board_empty": "是",
+                    "close_archive_ok": "是",
+                    "verdict_4": "确认性 L1",
+                }
+            },
+        )
+    except ValueError as e:
+        assert "L1" in str(e) or "verdict" in str(e)
+    else:
+        raise AssertionError("close must not reopen L1")
 
 
 if __name__ == "__main__":
@@ -913,6 +1132,12 @@ if __name__ == "__main__":
     test_change_then_fresh_output_can_l1()
     test_change_then_partial_output_cannot_lift()
     test_incomplete_freeze_and_fake_checksum_fail_g3()
+    test_need_overlap_blocked()
+    test_plan_hours_cannot_exceed_budget()
+    test_comms_api_primary_blocked()
+    test_holdout_touched_and_foreign_need_blocked()
+    test_unaccepted_delivery_cannot_close()
+    test_close_cannot_reopen_l1()
     test_contradictory_did_cannot_l1()
     test_l1_without_did_csv_fails()
     print("ok")

@@ -1,6 +1,8 @@
 # 05 实施 · 节点提示词
 
-先读 `AGENTS.md`。周报口径必须抄 03，不得升级。
+先读 `AGENTS.md`。周报口径必须抄 03（诊断/续约）或本步复测（冲刺），不得升级。
+
+入口：G2。唯一任务：诊断无干预；冲刺填 `intervention_need_ids`/`holdout_untouched`/`intervention_completed_on`/`wait_days`，最终四选一只从复测写。人确认未改监测组。G5 硬检。打回：补完成日或拆非法干预。归宿周报 `out/05`。下一站 06。
 
 ## 你在哪
 

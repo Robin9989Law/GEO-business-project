@@ -90,12 +90,12 @@ REQUIRED = {
         "platforms_required",
     ),
     "07": ("budget_hours", "budget_scope", "quote_excludes_l1"),
-    "08": ("stakeholder_decision", "comms_cadence", "comms_bound"),
+    "08": ("stakeholder_decision", "comms_cadence", "comms_bound", "comms_api_not_primary"),
     "03": ("freeze_id", "data_grade", "baseline_verdict_4", "measure_isolated"),
-    "04": (),
+    "04": ("plan_hours",),
     "05": ("intervention_class",),
-    "06": ("verdict_4",),
-    "09": ("close_assets_ok", "close_no_reopen_l1"),
+    "06": ("verdict_4", "delivery_manifest_checksum", "freeze_match", "delivery_accepted"),
+    "09": ("close_assets_ok", "close_no_reopen_l1", "close_manifest_ok", "close_board_empty", "close_archive_ok"),
 }
 MIN_DID_CLUSTERS = 2
 FREEZE_ROOT = ROOT / "流程" / "03 测量" / "配置" / "冻结"
@@ -333,6 +333,42 @@ def missing_required(
     miss = [k for k in need if not str(fields.get(k) or "").strip()]
     if stage == "04" and not fields.get("windows"):
         miss.append("windows")
+    if stage == "04":
+        try:
+            plan = float(str(fields.get("plan_hours") or "").strip())
+            budget = float(str(fields.get("budget_hours") or "").strip())
+            if plan <= 0 or plan > budget:
+                miss.append("plan_hours")
+        except ValueError:
+            miss.append("plan_hours")
+    if stage == "02":
+        if _norm_ids(fields.get("treat_need_ids")) & _norm_ids(fields.get("holdout_need_ids")):
+            miss.append("need_overlap")
+    if stage == "05" and sop == "冲刺":
+        for key in ("intervention_need_ids", "holdout_untouched", "intervention_completed_on", "wait_days"):
+            if not str(fields.get(key) or "").strip():
+                miss.append(key)
+        if fields.get("holdout_untouched") and not _is_yes(fields.get("holdout_untouched")):
+            miss.append("holdout_untouched")
+        extra = _norm_ids(fields.get("intervention_need_ids")) - _norm_ids(fields.get("treat_need_ids"))
+        if extra:
+            miss.append("intervention_need_ids")
+        try:
+            if float(str(fields.get("wait_days") or "").strip()) < 0:
+                miss.append("wait_days")
+        except ValueError:
+            miss.append("wait_days")
+    if stage == "06":
+        if fields.get("freeze_match") and not _is_yes(fields.get("freeze_match")):
+            miss.append("freeze_match")
+        if fields.get("delivery_accepted") and not _is_yes(fields.get("delivery_accepted")):
+            miss.append("delivery_accepted")
+    if stage == "08" and fields.get("comms_api_not_primary") is not None and not _is_yes(fields.get("comms_api_not_primary")):
+        miss.append("comms_api_not_primary")
+    if stage == "09":
+        for key in ("close_manifest_ok", "close_board_empty", "close_archive_ok"):
+            if fields.get(key) is not None and not _is_yes(fields.get(key)):
+                miss.append(key)
     if stage == "01" and not _is_yes(fields.get("ban_ack", "")):
         miss.append("ban_ack")
     if stage == "07":
@@ -556,6 +592,11 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
         for bad in BANNED_CLAIMS:
             if bad in text:
                 _fail(f"banned claim in {key}: {bad}")
+    if stage == "02":
+        treat = _norm_ids(incoming.get("treat_need_ids", state["fields"].get("treat_need_ids")))
+        hold = _norm_ids(incoming.get("holdout_need_ids", state["fields"].get("holdout_need_ids")))
+        if treat and hold and treat & hold:
+            _fail("treat and holdout need ids must be disjoint")
     if stage == "02" and "sop_stage" in incoming:
         intent = state["fields"].get("sop_stage_intent") or incoming.get("sop_stage")
         locked = incoming["sop_stage"]
@@ -575,6 +616,9 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
         bound = str(incoming.get("comms_bound", state["fields"].get("comms_bound", "")))
         if bound and "四选一" not in bound and "不得宽于" not in bound:
             _fail("comms_bound must stay within verdict_4")
+        api_flag = incoming.get("comms_api_not_primary", state["fields"].get("comms_api_not_primary"))
+        if api_flag is not None and not _is_yes(api_flag):
+            _fail("decision maker cannot use API as primary table")
     if stage == "04":
         windows = set(payload.get("windows") or [])
         sop = state["fields"].get("sop_stage")
@@ -582,6 +626,19 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
         extra = windows - allowed
         if extra:
             _fail(f"windows not allowed for {sop}: {sorted(extra)}")
+        plan_raw = incoming.get("plan_hours", state["fields"].get("plan_hours"))
+        budget_raw = state["fields"].get("budget_hours")
+        if plan_raw is not None:
+            try:
+                plan = float(str(plan_raw).strip())
+                budget = float(str(budget_raw or "").strip())
+            except ValueError:
+                _fail("plan_hours must be a number")
+            else:
+                if plan <= 0:
+                    _fail("plan_hours must be > 0")
+                if plan > budget:
+                    _fail("plan_hours cannot exceed budget_hours")
     if stage == "05":
         sop = state["fields"].get("sop_stage")
         klass = incoming.get("intervention_class", state["fields"].get("intervention_class", ""))
@@ -593,6 +650,20 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
             incoming.pop(key, None)
         if incoming.get("verdict_4") == "确认性 L1":
             incoming.update(derive_l1_from_files(state["case_id"], _merged_fields(state, incoming, payload), cases_root))
+        if sop == "冲刺":
+            needs = _norm_ids(incoming.get("intervention_need_ids", state["fields"].get("intervention_need_ids")))
+            treat = _norm_ids(state["fields"].get("treat_need_ids"))
+            if needs - treat:
+                _fail("intervention needs must belong to treat_need_ids")
+            hold = incoming.get("holdout_untouched", state["fields"].get("holdout_untouched"))
+            if hold is not None and not _is_yes(hold):
+                _fail("holdout group must stay untouched")
+            if incoming.get("wait_days", state["fields"].get("wait_days")) is not None:
+                try:
+                    if float(str(incoming.get("wait_days", state["fields"].get("wait_days"))).strip()) < 0:
+                        _fail("wait_days must be >= 0")
+                except ValueError:
+                    _fail("wait_days must be a number")
     if stage == "03":
         fid = incoming.get("freeze_id", state["fields"].get("freeze_id", ""))
         fd = resolve_freeze_dir(str(fid), state["case_id"], cases_root)
@@ -621,6 +692,10 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
         if v and prior and v != prior:
             _fail("verdict_4 must match locked value")
         _check_verdict(stage, sop or "", _merged_fields(state, incoming, payload), incoming)
+        if incoming.get("freeze_match") is not None and not _is_yes(incoming.get("freeze_match")):
+            _fail("delivery freeze_id must match locked freeze")
+        if incoming.get("delivery_accepted") is not None and not _is_yes(incoming.get("delivery_accepted")):
+            _fail("delivery not accepted; cannot proceed to close")
     if stage == "05":
         sop = state["fields"].get("sop_stage")
         _check_verdict(stage, sop or "", _merged_fields(state, incoming, payload), incoming)
@@ -633,6 +708,16 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
             _fail("cannot reopen L1 at close")
         v = incoming.get("verdict_4")
         prior = state["fields"].get("verdict_4")
+        if incoming.get("verdict_4") == "确认性 L1" and prior != "确认性 L1":
+            _fail("cannot reopen L1 at close")
+        for key, msg in (
+            ("close_manifest_ok", "formal manifest does not match gates"),
+            ("close_board_empty", "transfer board still has pending items"),
+            ("close_archive_ok", "archive checklist incomplete"),
+        ):
+            val = incoming.get(key)
+            if val is not None and not _is_yes(val):
+                _fail(msg)
         if v and prior and v != prior:
             _fail("verdict_4 must match locked value")
     miss = missing_required(state, incoming, payload, cases_root=cases_root)

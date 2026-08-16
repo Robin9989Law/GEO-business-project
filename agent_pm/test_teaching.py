@@ -369,7 +369,7 @@ def _walk(sop: str) -> None:
     _pass(st, root)
     engine.apply_fields(
         st,
-        {"fields": {"stakeholder_decision": "客户决策人", "comms_cadence": "每周", "comms_bound": "不得宽于四选一"}},
+        {"fields": {"stakeholder_decision": "客户决策人", "comms_cadence": "每周", "comms_bound": "不得宽于四选一", "comms_api_not_primary": "是"}},
         cases_root=root,
     )
     engine.decide(st, "G7", "APPROVE", actor="human", cases_root=root)
@@ -380,22 +380,54 @@ def _walk(sop: str) -> None:
     engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
     windows = {"诊断": ["noise", "baseline"], "冲刺": ["noise", "baseline", "intervention", "retest"], "续约": ["weekly", "calib"]}[sop]
     _pass(st, root)
-    engine.apply_fields(st, {"windows": windows}, cases_root=root)
+    engine.apply_fields(st, {"windows": windows, "fields": {"plan_hours": "10"}}, cases_root=root)
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     _pass(st, root)
     klass = "无" if sop == "诊断" else ("FAQ" if sop == "冲刺" else "无")
     extra = {}
     if sop == "冲刺":
-        extra["verdict_4"] = "受控前后描述"
+        extra.update(
+            {
+                "verdict_4": "受控前后描述",
+                "intervention_need_ids": "N01",
+                "holdout_untouched": "是",
+                "intervention_completed_on": "2026-08-01",
+                "wait_days": "7",
+            }
+        )
     engine.apply_fields(st, {"fields": {"intervention_class": klass, **extra}}, cases_root=root)
     engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
     _pass(st, root)
     v = {"诊断": "描述基线", "冲刺": "受控前后描述", "续约": "不能下结论"}[sop]
-    engine.apply_fields(st, {"fields": {"verdict_4": v}}, cases_root=root)
+    engine.apply_fields(
+        st,
+        {
+            "fields": {
+                "verdict_4": v,
+                "delivery_manifest_checksum": "abc123",
+                "freeze_match": "是",
+                "delivery_accepted": "是",
+            }
+        },
+        cases_root=root,
+    )
     engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
     assert st["stage"] == "09"
     _pass(st, root)
-    engine.apply_fields(st, {"fields": {"close_assets_ok": "是", "close_no_reopen_l1": "是", "verdict_4": v}}, cases_root=root)
+    engine.apply_fields(
+        st,
+        {
+            "fields": {
+                "close_assets_ok": "是",
+                "close_no_reopen_l1": "是",
+                "close_manifest_ok": "是",
+                "close_board_empty": "是",
+                "close_archive_ok": "是",
+                "verdict_4": v,
+            }
+        },
+        cases_root=root,
+    )
     engine.decide(st, "G8", "APPROVE", actor="human", cases_root=root)
     assert engine.next_action(st)["waiting"] == "done"
     assert st["activity"] == "done"

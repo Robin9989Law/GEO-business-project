@@ -386,12 +386,29 @@ def hard_rule_failures(
             fails.append(
                 _fail_item(state, "cross_stage", f"不能从 {intent} 加宽到 {locked}", "保持意向产品线或只允许收窄", raw_row, "sop_stage")
             )
+    if stage == "02":
+        treat = engine._norm_ids(fields.get("treat_need_ids") or state["fields"].get("treat_need_ids"))
+        hold = engine._norm_ids(fields.get("holdout_need_ids") or state["fields"].get("holdout_need_ids"))
+        if treat and hold and treat & hold:
+            fails.append(_fail_item(state, "field_legal", "处理组与监测组 need 不能相交", "拆开 treat_need_ids 与 holdout_need_ids", raw_row, "holdout_need_ids"))
     if stage == "07" and sop == "诊断":
         scope = str(fields.get("budget_scope") or state["fields"].get("budget_scope") or "")
         if any(tok in scope for tok in engine.DIAG_BUDGET_BAN):
             fails.append(
                 _fail_item(state, "cross_stage", "诊断预算不能含干预/一类证据/改页", "范围改成冻结+噪声+基线+抽检", raw_row, "budget_scope")
             )
+    if stage == "08" and fields.get("comms_api_not_primary") and not engine._is_yes(fields.get("comms_api_not_primary")):
+        fails.append(_fail_item(state, "field_legal", "决策人不得以 API 为主表", "comms_api_not_primary 必须为是", raw_row, "comms_api_not_primary"))
+    if stage == "04" and fields.get("plan_hours"):
+        try:
+            plan = float(str(fields.get("plan_hours")).strip())
+            budget = float(str(state["fields"].get("budget_hours") or fields.get("budget_hours") or "").strip())
+            if plan <= 0 or plan > budget:
+                fails.append(_fail_item(state, "cross_stage", "plan_hours 必须 >0 且不超过 budget_hours", "改人天或走变更", raw_row, "plan_hours"))
+        except ValueError:
+            fails.append(_fail_item(state, "field_legal", "plan_hours 必须是数字", "填写大于 0 的人天", raw_row, "plan_hours"))
+    if stage == "09" and fields.get("verdict_4") == "确认性 L1" and state["fields"].get("verdict_4") != "确认性 L1":
+        fails.append(_fail_item(state, "cross_stage", "结项不得重开 L1", "复述 06 已接收的四选一", raw_row, "verdict_4"))
     if fields.get("verdict_4"):
         v = fields["verdict_4"]
         if sop and v not in engine.VERDICT_OK.get(sop, ()):

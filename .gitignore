@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 测量/
 **/.keep
+.env
+.env.*
+研究/业务流程文献/_secrets/
 
 # 开单实例，不是模板
 agent_pm/cases/*/
