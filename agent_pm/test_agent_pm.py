@@ -109,6 +109,14 @@ def _apply03(st: dict, root: Path, extra: dict | None = None) -> None:
     if extra:
         fields.update(extra)
     engine.apply_fields(st, {"fields": fields}, cases_root=root)
+    _seed_delivery(root, st)
+
+
+def _seed_delivery(root: Path, st: dict) -> str:
+    out = Path(root) / st["case_id"] / "measure" / "出数"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "metrics_daily.csv").write_text("metric,value\nmention,0\n", encoding="utf-8")
+    return engine.delivery_files_checksum(out)
 
 
 def _lock_07_08(st: dict, sop: str = "诊断") -> None:
@@ -296,11 +304,10 @@ def test_diagnosis_blocks_intervention_and_verdict() -> None:
         {
             "fields": {
                 "verdict_4": "描述基线",
-                "delivery_manifest_checksum": "abc123",
-                "freeze_match": "是",
                 "delivery_accepted": "是",
             }
         },
+        cases_root=root,
     )
     nxt = engine.next_action(st)
     assert nxt["waiting"] == "human" and nxt["gate"] == "G4"
@@ -317,12 +324,10 @@ def test_diagnosis_blocks_intervention_and_verdict() -> None:
             "fields": {
                 "close_assets_ok": "是",
                 "close_no_reopen_l1": "是",
-                "close_manifest_ok": "是",
-                "close_board_empty": "是",
-                "close_archive_ok": "是",
                 "verdict_4": "描述基线",
             }
         },
+        cases_root=root,
     )
     engine.decide(st, "G8", "APPROVE", actor="human", cases_root=root)
     assert engine.next_action(st)["waiting"] == "done"
@@ -1058,16 +1063,70 @@ def test_unaccepted_delivery_cannot_close() -> None:
             {
                 "fields": {
                     "verdict_4": "描述基线",
-                    "delivery_manifest_checksum": "abc",
-                    "freeze_match": "是",
                     "delivery_accepted": "否",
                 }
             },
+            cases_root=root,
         )
     except ValueError as e:
         assert "accepted" in str(e) or "delivery" in str(e)
     else:
         raise AssertionError("unaccepted delivery must fail")
+
+
+def test_delivery_checksum_must_match_case_files() -> None:
+    root = _root()
+    engine.init_case("ck1", root)
+    st = engine.load_state("ck1", root)
+    _lock_01_02(st, "诊断")
+    _lock_07_08(st, "诊断")
+    _apply03(st, root)
+    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
+    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
+    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是", "delivery_manifest_checksum": "deadbeef"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "checksum" in str(e)
+    else:
+        raise AssertionError("forged delivery checksum must fail")
+
+
+def test_pending_board_blocks_close() -> None:
+    import files as _files
+
+    root = _root()
+    engine.init_case("bd1", root)
+    st = engine.load_state("bd1", root)
+    _lock_01_02(st, "诊断")
+    _lock_07_08(st, "诊断")
+    _apply03(st, root)
+    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
+    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
+    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}}, cases_root=root)
+    engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
+    note = root / "note.md"
+    note.write_text("xfer", encoding="utf-8")
+    _files.drop_exchange("bd1", note, "操作员", "评分", cases_root=root)
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"close_assets_ok": "是", "close_no_reopen_l1": "是", "verdict_4": "描述基线"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "board" in str(e) or "pending" in str(e)
+    else:
+        raise AssertionError("pending transfer must block close")
 
 
 def test_close_cannot_reopen_l1() -> None:
@@ -1084,14 +1143,8 @@ def test_close_cannot_reopen_l1() -> None:
     engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
     engine.apply_fields(
         st,
-        {
-            "fields": {
-                "verdict_4": "描述基线",
-                "delivery_manifest_checksum": "abc",
-                "freeze_match": "是",
-                "delivery_accepted": "是",
-            }
-        },
+        {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}},
+        cases_root=root,
     )
     engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
     try:
@@ -1101,12 +1154,10 @@ def test_close_cannot_reopen_l1() -> None:
                 "fields": {
                     "close_assets_ok": "是",
                     "close_no_reopen_l1": "是",
-                    "close_manifest_ok": "是",
-                    "close_board_empty": "是",
-                    "close_archive_ok": "是",
                     "verdict_4": "确认性 L1",
                 }
             },
+            cases_root=root,
         )
     except ValueError as e:
         assert "L1" in str(e) or "verdict" in str(e)
@@ -1137,6 +1188,8 @@ if __name__ == "__main__":
     test_comms_api_primary_blocked()
     test_holdout_touched_and_foreign_need_blocked()
     test_unaccepted_delivery_cannot_close()
+    test_delivery_checksum_must_match_case_files()
+    test_pending_board_blocks_close()
     test_close_cannot_reopen_l1()
     test_contradictory_did_cannot_l1()
     test_l1_without_did_csv_fails()

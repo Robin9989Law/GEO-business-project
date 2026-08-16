@@ -401,14 +401,7 @@ def _walk(sop: str) -> None:
     v = {"诊断": "描述基线", "冲刺": "受控前后描述", "续约": "不能下结论"}[sop]
     engine.apply_fields(
         st,
-        {
-            "fields": {
-                "verdict_4": v,
-                "delivery_manifest_checksum": "abc123",
-                "freeze_match": "是",
-                "delivery_accepted": "是",
-            }
-        },
+        {"fields": {"verdict_4": v, "delivery_accepted": "是"}},
         cases_root=root,
     )
     engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
@@ -420,9 +413,6 @@ def _walk(sop: str) -> None:
             "fields": {
                 "close_assets_ok": "是",
                 "close_no_reopen_l1": "是",
-                "close_manifest_ok": "是",
-                "close_board_empty": "是",
-                "close_archive_ok": "是",
                 "verdict_4": v,
             }
         },

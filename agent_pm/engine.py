@@ -404,6 +404,110 @@ def _measure_out_dirs(case_id: str, cases_root: Path | None) -> list[Path]:
     return out
 
 
+SHARED_DELIVERY = ROOT / "流程" / "03 测量" / "出数"
+DELIVERY_HASH_FILES = (
+    "evidence_manifest.json",
+    "metrics_daily.csv",
+    "coverage.csv",
+    "did.csv",
+)
+
+
+def _is_shared_delivery(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(SHARED_DELIVERY.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def resolve_delivery_dir(case_id: str, cases_root: Path | None = None) -> Path | None:
+    for d in _measure_out_dirs(case_id, cases_root):
+        if not d.is_dir():
+            continue
+        if _is_shared_delivery(d):
+            continue
+        if any((d / name).is_file() for name in DELIVERY_HASH_FILES):
+            return d
+    return None
+
+
+def delivery_files_checksum(out_dir: Path) -> str:
+    h = hashlib.sha256()
+    found = False
+    for name in DELIVERY_HASH_FILES:
+        p = Path(out_dir) / name
+        if not p.is_file():
+            continue
+        found = True
+        h.update(name.encode("utf-8"))
+        h.update(p.read_bytes())
+    return h.hexdigest()[:16] if found else ""
+
+
+def formal_docs_checksum_errors(case_id: str, cases_root: Path | None = None) -> list[str]:
+    import files as _files
+
+    vault = _files.vault_path(case_id, cases_root)
+    current_dir = vault / "正式" / "现行"
+    errs = []
+    for doc in _files._docs(vault):
+        if doc.get("status") != "现行":
+            continue
+        doc_id = doc.get("doc_id") or ""
+        suffix = Path(doc.get("path") or ".md").suffix or ".md"
+        current = current_dir / f"{doc_id}{suffix}"
+        if not current.is_file():
+            hits = list(current_dir.glob(doc_id + ".*")) if doc_id else []
+            current = hits[0] if hits else current
+        if not current.is_file() or _files._sha256(current) != (doc.get("checksum") or ""):
+            errs.append(doc_id or "doc")
+    return errs
+
+
+def _enforce_delivery(state: dict, incoming: dict, cases_root: Path | None) -> None:
+    out = resolve_delivery_dir(state.get("case_id") or "", cases_root)
+    if out is None:
+        _fail("no case delivery files under 案件/{本案}/出数")
+    computed = delivery_files_checksum(out)
+    if not computed:
+        _fail("no case delivery files under 案件/{本案}/出数")
+    stated = incoming.get("delivery_manifest_checksum", state["fields"].get("delivery_manifest_checksum"))
+    if stated and str(stated).strip() != computed:
+        _fail("delivery_manifest_checksum mismatch")
+    incoming["delivery_manifest_checksum"] = computed
+    fid = str(state["fields"].get("freeze_id") or incoming.get("freeze_id") or "").strip()
+    fd = resolve_freeze_dir(fid, state.get("case_id") or "", cases_root)
+    if fd is None:
+        _fail("delivery freeze_id must match locked freeze")
+    mismatch = freeze_contract_errors(fd, _merged_fields(state, incoming, {}))
+    if mismatch:
+        _fail("delivery freeze_id must match locked freeze")
+    incoming["freeze_match"] = "是"
+
+
+def _enforce_close(state: dict, incoming: dict, cases_root: Path | None) -> None:
+    import files as _files
+
+    case_id = state.get("case_id") or ""
+    board = _files.board(case_id, cases_root)
+    if board.get("pending"):
+        _fail("transfer board still has pending items")
+    incoming["close_board_empty"] = "是"
+    if board.get("locks"):
+        _fail("archive checklist incomplete")
+    incoming["close_archive_ok"] = "是"
+    doc_errs = formal_docs_checksum_errors(case_id, cases_root)
+    if doc_errs:
+        _fail("formal manifest does not match gates")
+    incoming["close_manifest_ok"] = "是"
+    locked = str(state["fields"].get("delivery_manifest_checksum") or "").strip()
+    out = resolve_delivery_dir(case_id, cases_root)
+    computed = delivery_files_checksum(out) if out else ""
+    if not locked or not computed or locked != computed:
+        _fail("delivery checksum changed since G4")
+
+
 def _evidence_identity(case_id: str, fields: dict) -> dict:
     ident = {
         "case_id": case_id,
@@ -692,10 +796,9 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
         if v and prior and v != prior:
             _fail("verdict_4 must match locked value")
         _check_verdict(stage, sop or "", _merged_fields(state, incoming, payload), incoming)
-        if incoming.get("freeze_match") is not None and not _is_yes(incoming.get("freeze_match")):
-            _fail("delivery freeze_id must match locked freeze")
         if incoming.get("delivery_accepted") is not None and not _is_yes(incoming.get("delivery_accepted")):
             _fail("delivery not accepted; cannot proceed to close")
+        _enforce_delivery(state, incoming, cases_root)
     if stage == "05":
         sop = state["fields"].get("sop_stage")
         _check_verdict(stage, sop or "", _merged_fields(state, incoming, payload), incoming)
@@ -710,16 +813,9 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
         prior = state["fields"].get("verdict_4")
         if incoming.get("verdict_4") == "确认性 L1" and prior != "确认性 L1":
             _fail("cannot reopen L1 at close")
-        for key, msg in (
-            ("close_manifest_ok", "formal manifest does not match gates"),
-            ("close_board_empty", "transfer board still has pending items"),
-            ("close_archive_ok", "archive checklist incomplete"),
-        ):
-            val = incoming.get(key)
-            if val is not None and not _is_yes(val):
-                _fail(msg)
         if v and prior and v != prior:
             _fail("verdict_4 must match locked value")
+        _enforce_close(state, incoming, cases_root)
     miss = missing_required(state, incoming, payload, cases_root=cases_root)
     if miss:
         _fail("missing required: " + ",".join(miss))
