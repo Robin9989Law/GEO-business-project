@@ -158,6 +158,16 @@ def check_8_verdict4_source_in_agents() -> list[str]:
         "agent_pm/agents/09_close.md": [
             ("回声", "回声 06"),
         ],
+        "流程/03 测量/AGENT.md": [
+            "baseline_verdict_4",
+            ("05 复测后", "留给 05"),
+        ],
+        "流程/06 交付物/AGENT.md": [
+            ("抄 03", "抄 05", "诊断/续约抄 03"),
+        ],
+        "流程/09 收尾/AGENT.md": [
+            ("回声 06", "只回声"),
+        ],
     }
     for rel, signal_groups in expected_signals.items():
         path = ROOT / rel

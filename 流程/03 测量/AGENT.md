@@ -6,7 +6,7 @@
 
 验收真相在这里产生。02 的字段灌进配置并冻结；人采 App；你跑 API 哨兵与出数。
 
-上游必须：G1、G6、G7，以及锁死的 `sop_stage` / need / 平台 / 验收规则 / 人天 / 沟通口径。  
+上游必须：G1、G6、G7，以及锁死的 `sop_stage` / need / 平台 / 验收规则 / 人时 / 沟通口径。  
 下游：04 只许排本产品线允许的窗。冲刺的最终四选一在 **05 复测后**才写，本步只锁基线。
 
 门：**G3**。
@@ -15,9 +15,9 @@
 
 | `sop_stage` | 本步只跑 | 本步只许写 |
 |---|---|---|
-| 诊断 | `noise` + `baseline` | `baseline_verdict_4` / `verdict_4` = 描述基线或不能下结论 |
-| 冲刺 | `noise` + `baseline`（**不做 retest**） | 只写 `baseline_verdict_4`；禁止确认性 L1 |
-| 续约 | `weekly` + `calib` | 不能下结论（不重开 L1） |
+| 诊断 | `day0` + `noise` + `baseline` | `baseline_verdict_4` 与最终 `verdict_4` = 描述基线或不能下结论 |
+| 冲刺 | `day0` + `noise` + `baseline`（**不做 retest**） | 只写 `baseline_verdict_4`；最终 `verdict_4` 留给 05 复测后；禁止确认性 L1 |
+| 续约 | `day0` + `weekly` + `calib` | 最终 `verdict_4` = 不能下结论（不重开 L1） |
 
 - 未冻结不准采、不准对比。  
 - 没有噪声底不准解释涨跌。  

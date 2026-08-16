@@ -265,6 +265,48 @@ FREEZE_HASH_FILES = (
 )
 
 
+def _freeze_csv_rows(path: Path) -> list[dict]:
+    if not path.is_file() or path.stat().st_size == 0:
+        return []
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        return [{(k or "").lstrip("\ufeff"): v for k, v in row.items()} for row in csv.DictReader(f)]
+
+
+def _row_active(row: dict) -> bool:
+    if "active" not in row:
+        return True
+    return str(row.get("active") or "").strip() in {"1", "true", "True", "是", "yes"}
+
+
+def freeze_query_need_sets(freeze_path: Path) -> tuple[set[str], set[str]]:
+    treat: set[str] = set()
+    hold: set[str] = set()
+    for row in _freeze_csv_rows(freeze_path / "queries.csv"):
+        if not _row_active(row):
+            continue
+        need = str(row.get("need_id") or "").strip()
+        if not need:
+            continue
+        kind = str(row.get("set") or "").strip()
+        if kind == "holdout":
+            hold.add(need)
+        elif kind in {"core", "treat"} or str(row.get("treat") or "").strip() == "1":
+            treat.add(need)
+    return treat, hold
+
+
+def freeze_active_platform_tokens(freeze_path: Path) -> set[str]:
+    toks: set[str] = set()
+    for row in _freeze_csv_rows(freeze_path / "platforms.csv"):
+        if not _row_active(row):
+            continue
+        for key in ("tier", "channel", "platform"):
+            val = str(row.get(key) or "").strip()
+            if val:
+                toks.add(val)
+    return toks
+
+
 def freeze_files_checksum(freeze_path: Path) -> str:
     h = hashlib.sha256()
     for name in FREEZE_HASH_FILES:
@@ -293,6 +335,17 @@ def freeze_contract_errors(freeze_path: Path, fields: dict) -> list[str]:
         left, right = str(proj.get(key) or "").strip(), str(fields.get(key) or "").strip()
         if not left or not right or _norm_ids(left) != _norm_ids(right):
             miss.append(key)
+    q_treat, q_hold = freeze_query_need_sets(freeze_path)
+    want_treat = _norm_ids(fields.get("treat_need_ids"))
+    want_hold = _norm_ids(fields.get("holdout_need_ids"))
+    if not q_treat or q_treat != want_treat:
+        miss.append("queries.treat")
+    if not q_hold or q_hold != want_hold:
+        miss.append("queries.holdout")
+    plat_toks = freeze_active_platform_tokens(freeze_path)
+    req = _norm_ids(fields.get("platforms_required"))
+    if not req or not plat_toks or not req.issubset(plat_toks):
+        miss.append("platforms.csv")
     computed = freeze_files_checksum(freeze_path)
     stated = ""
     ck_p = freeze_path / "checksum.txt"

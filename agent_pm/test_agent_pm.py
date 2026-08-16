@@ -157,7 +157,18 @@ def _install_freeze(root: Path, st: dict, freeze_id: str = "fz-test") -> str:
                 "platforms_required": f["platforms_required"],
             }
         )
-    for name in ("queries.csv", "aliases.csv", "facts.csv", "owned_sources.csv", "platforms.csv"):
+    treat = (f.get("treat_need_ids") or "N01").split(";")[0].strip() or "N01"
+    hold = (f.get("holdout_need_ids") or "H01").split(";")[0].strip() or "H01"
+    with (d / "queries.csv").open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["query_id", "set", "need_id", "active"])
+        w.writeheader()
+        w.writerow({"query_id": "Q01", "set": "core", "need_id": treat, "active": "1"})
+        w.writerow({"query_id": "Q02", "set": "holdout", "need_id": hold, "active": "1"})
+    with (d / "platforms.csv").open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["channel", "tier", "active"])
+        w.writeheader()
+        w.writerow({"channel": "app_doubao", "tier": "P0", "active": "1"})
+    for name in ("aliases.csv", "facts.csv", "owned_sources.csv"):
         (d / name).write_text("id\n", encoding="utf-8")
     (d / "checksum.txt").write_text(engine.freeze_files_checksum(d) + "\n", encoding="utf-8")
     return freeze_id

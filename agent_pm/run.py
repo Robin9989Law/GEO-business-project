@@ -66,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--title", default="")
     p.add_argument("--doc-id", dest="doc_id", default="")
     p.add_argument("--member", default="")
+    p.add_argument("--role", default="")
+    p.add_argument("--decision-reason", dest="decision_reason", default="")
+    p.add_argument("--change-json", dest="change_json", default="")
     p.add_argument("--from", dest="sender", default="")
     p.add_argument("--to", dest="receiver", default="")
     p.add_argument("--item", default="")
@@ -248,6 +251,12 @@ def main(argv: list[str] | None = None) -> int:
             if not args.gate or not args.verdict:
                 raise SystemExit("decide needs --gate and --verdict")
             actor = args.actor or "human"
+            change_payload = None
+            if args.change_json:
+                change_payload = json.loads(Path(args.change_json).read_text(encoding="utf-8"))
+            elif args.verdict == "CHANGE" and args.json_path:
+                blob = json.loads(Path(args.json_path).read_text(encoding="utf-8"))
+                change_payload = blob.get("change_payload") or blob
             engine.decide(
                 state,
                 args.gate,
@@ -255,6 +264,10 @@ def main(argv: list[str] | None = None) -> int:
                 actor=actor,
                 cases_root=root,
                 rewind_to=args.rewind_to or None,
+                member=args.member,
+                role=args.role,
+                decision_reason=args.decision_reason,
+                change_payload=change_payload,
             )
             engine.save_state(state, root)
             _print(engine.next_action(state))

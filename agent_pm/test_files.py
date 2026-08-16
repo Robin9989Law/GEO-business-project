@@ -254,6 +254,83 @@ def test_rewind_invalidates_formal() -> None:
     assert dead and "商机要点" in dead[0].read_text(encoding="utf-8")
 
 
+def test_cli_key_gate_needs_member_and_role() -> None:
+    root = _root()
+    assert run.main(["init", "cli-g1", "--cases-root", str(root)]) == 0
+    st = engine.load_state("cli-g1", root)
+    engine.apply_fields(
+        st,
+        {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+    )
+    engine.save_state(st, root)
+    assert run.main(["decide", "cli-g1", "--gate", "G0", "--verdict", "APPROVE", "--cases-root", str(root)]) == 0
+    st = engine.load_state("cli-g1", root)
+    engine.apply_fields(
+        st,
+        {
+            "fields": {
+                "project_id": "P1",
+                "owner": "编排",
+                "sop_stage": "诊断",
+                "primary_goal": engine.PRIMARY_GOAL_TEXT,
+                "primary_endpoint": "p_mention",
+                "causal_claim": "descriptive_until_isolation",
+                "control_design": "监测组",
+                "success_rule_diagnosis": "描述基线",
+                "success_rule_sprint": "受控前后描述",
+                "success_rule_retain": "不能下结论",
+                "treat_need_ids": "N01",
+                "holdout_need_ids": "H01",
+                "platforms_required": "P0",
+            }
+        },
+    )
+    engine.save_state(st, root)
+    assert run.main(["decide", "cli-g1", "--gate", "G1", "--verdict", "APPROVE", "--cases-root", str(root)]) == 2
+    assert (
+        run.main(
+            [
+                "decide",
+                "cli-g1",
+                "--gate",
+                "G1",
+                "--verdict",
+                "APPROVE",
+                "--member",
+                "甲",
+                "--role",
+                "负责人",
+                "--cases-root",
+                str(root),
+            ]
+        )
+        == 0
+    )
+    st = engine.load_state("cli-g1", root)
+    assert st["gates"]["G1"]["verdict"] == "PENDING_DUAL"
+    assert (
+        run.main(
+            [
+                "decide",
+                "cli-g1",
+                "--gate",
+                "G1",
+                "--verdict",
+                "APPROVE",
+                "--member",
+                "乙",
+                "--role",
+                "GEO/验收专业复核",
+                "--cases-root",
+                str(root),
+            ]
+        )
+        == 0
+    )
+    st = engine.load_state("cli-g1", root)
+    assert st["stage"] == "07"
+
+
 def test_cli_board() -> None:
     root = _root()
     assert run.main(["init", "c1", "--cases-root", str(root)]) == 0
@@ -352,6 +429,7 @@ if __name__ == "__main__":
     test_decide_promotes_out()
     test_promote_does_not_republish_prior_stage()
     test_rewind_invalidates_formal()
+    test_cli_key_gate_needs_member_and_role()
     test_cli_board()
     test_csv_is_atomic_and_rejects_duplicate_keys()
     test_board_pair_and_check_vault()

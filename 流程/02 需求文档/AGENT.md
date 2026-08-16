@@ -9,7 +9,7 @@
 把 01 的意向锁成验收合同。主终点、产品线、处理组/监测组、平台在这里一次性锁死。
 
 上游必须已有：G0、品类、城市、代号、意向 `sop_stage`。  
-下游：07 按本步范围估人天；08 按本步允许集锁对外口径；03 只灌入配置，不许另立口径。
+下游：07 按本步范围估人时；08 按本步允许集锁对外口径；03 只灌入配置，不许另立口径。
 
 门：**G1**。
 
@@ -19,7 +19,8 @@
 - 处理组 `treat_need_ids`：本轮要动的信息需求。  
 - 监测组 `holdout_need_ids`：同品类同城、本轮不优化；与处理组不能相交。  
 - 平台默认 P0，分平台出数，禁止平均。  
-- `primary_endpoint` 只能 `p_mention`；`causal_claim` 默认 `descriptive_until_isolation`。
+- `primary_endpoint` 只能 `p_mention`；`causal_claim` 默认 `descriptive_until_isolation`。  
+- 三套验收规则必须写全且与产品线一致：`success_rule_diagnosis`（描述基线/不能下结论）、`success_rule_sprint`（受控前后描述/确认性 L1/不能下结论）、`success_rule_retain`（只能不能下结论）。
 
 ## 你要做
 

@@ -389,6 +389,54 @@ def test_13_three_full_paths() -> None:
     print("✅ #13 诊断/冲刺/续约三条完整路径均能走到 G8")
 
 
+# ---- 冻结表行集：queries.csv / platforms.csv 必须对上合同字段 ----
+def test_freeze_tables_must_match_need_and_platform_sets() -> None:
+    import csv
+
+    root = _root()
+    st = _start(root, "acc-fz")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
+    fid = _install_freeze(root, st)
+    d = root / st["case_id"] / "measure" / "冻结" / fid
+    with (d / "queries.csv").open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["query_id", "set", "need_id", "active"])
+        w.writeheader()
+        w.writerow({"query_id": "Q01", "set": "core", "need_id": "N99", "active": "1"})
+        w.writerow({"query_id": "Q02", "set": "holdout", "need_id": "H01", "active": "1"})
+    (d / "checksum.txt").write_text(engine.freeze_files_checksum(d) + "\n", encoding="utf-8")
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"freeze_id": fid, "data_grade": "定向级", "baseline_verdict_4": "描述基线", "verdict_4": "描述基线"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "queries.treat" in str(e)
+        print("✅ 冻结 queries.treat 与 treat_need_ids 不一致必失败")
+    else:
+        raise AssertionError("queries.csv need set mismatch should fail")
+
+    fid2 = _install_freeze(root, st, freeze_id="fz-plat")
+    d2 = root / st["case_id"] / "measure" / "冻结" / fid2
+    with (d2 / "platforms.csv").open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["channel", "tier", "active"])
+        w.writeheader()
+        w.writerow({"channel": "app_kimi", "tier": "P1", "active": "1"})
+    (d2 / "checksum.txt").write_text(engine.freeze_files_checksum(d2) + "\n", encoding="utf-8")
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"freeze_id": fid2, "data_grade": "定向级", "baseline_verdict_4": "描述基线", "verdict_4": "描述基线"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "platforms.csv" in str(e)
+        print("✅ 冻结 platforms.csv 不含 platforms_required 必失败")
+    else:
+        raise AssertionError("platforms.csv set mismatch should fail")
+
+
 # ---- 14. 所有 Agent 提示词中的关键术语与统一注册表一致 ----
 def test_14_agent_terms_match_registry() -> None:
     import subprocess
@@ -413,8 +461,9 @@ def main() -> int:
     test_12_guide_depth_varies_with_levels()
     test_13_three_full_paths()
     test_14_agent_terms_match_registry()
+    test_freeze_tables_must_match_need_and_platform_sets()
     print()
-    print("summary: 14/14 验收测试通过")
+    print("summary: 14/14 验收测试通过 + 冻结表行集")
     return 0
 
 
