@@ -187,9 +187,13 @@ def test_promote_does_not_republish_prior_stage() -> None:
         },
     )
     _write(root / "c1" / "out" / "02_章程.md", "章程\n")
+    _write(root / "c1" / "out" / "02_验收标准.md", "验收\n")
+    _write(root / "c1" / "out" / "02_需求规格.md", "规格\n")
     # P1-2: 关键门双签
     for member, role in [("owner_a", "负责人"), ("owner_b", "GEO/验收专业复核")]:
-        engine.decide(st, "G1", "APPROVE", actor="human", cases_root=root, member=member, role=role)
+        engine.decide(
+            st, "G1", "APPROVE", actor="human", cases_root=root, member=member, role=role, decision_reason="approve G1"
+        )
     vault = files.vault_path("c1", root)
     opp = [d for d in files._docs(vault) if d["doc_id"] == "01_商机卡"]
     assert len(opp) == 1 and opp[0]["stage"] == "01" and opp[0]["rev"] == "1"
@@ -263,6 +267,7 @@ def test_cli_key_gate_needs_member_and_role() -> None:
         {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
     )
     engine.save_state(st, root)
+    _write(root / "cli-g1" / "out" / "01_商机卡.md", "商机\n")
     assert run.main(["decide", "cli-g1", "--gate", "G0", "--verdict", "APPROVE", "--cases-root", str(root)]) == 0
     st = engine.load_state("cli-g1", root)
     engine.apply_fields(
@@ -286,6 +291,9 @@ def test_cli_key_gate_needs_member_and_role() -> None:
         },
     )
     engine.save_state(st, root)
+    _write(root / "cli-g1" / "out" / "02_章程.md", "章程\n")
+    _write(root / "cli-g1" / "out" / "02_验收标准.md", "验收\n")
+    _write(root / "cli-g1" / "out" / "02_需求规格.md", "规格\n")
     assert run.main(["decide", "cli-g1", "--gate", "G1", "--verdict", "APPROVE", "--cases-root", str(root)]) == 2
     assert (
         run.main(
@@ -300,6 +308,8 @@ def test_cli_key_gate_needs_member_and_role() -> None:
                 "甲",
                 "--role",
                 "负责人",
+                "--decision-reason",
+                "章程已锁",
                 "--cases-root",
                 str(root),
             ]

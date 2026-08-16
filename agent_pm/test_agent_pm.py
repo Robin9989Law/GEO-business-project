@@ -28,6 +28,8 @@ _DUAL_SIGNERS = {
 
 def _dual_decide(st: dict, gate: str, root: Path, **kw) -> None:
     signers = _DUAL_SIGNERS.get(gate, [("owner_a", "负责人")])
+    kw.setdefault("decision_reason", f"approve {gate}")
+    _seed_stage_out(root, st)
     for member, role in signers:
         engine.decide(st, gate, "APPROVE", actor="human", cases_root=root, member=member, role=role, **kw)
 
@@ -82,11 +84,14 @@ def _seed_stage_out(root: Path | None, st: dict) -> None:
 
 def _approve(st: dict, gate: str, root: Path | None = None) -> None:
     _seed_stage_out(root, st)
+    reason = f"approve {gate}"
     if gate in _DUAL_SIGNERS:
         for member, role in _DUAL_SIGNERS[gate]:
-            engine.decide(st, gate, "APPROVE", actor="human", cases_root=root, member=member, role=role)
+            engine.decide(
+                st, gate, "APPROVE", actor="human", cases_root=root, member=member, role=role, decision_reason=reason
+            )
     else:
-        engine.decide(st, gate, "APPROVE", actor="human", cases_root=root)
+        engine.decide(st, gate, "APPROVE", actor="human", cases_root=root, decision_reason=reason)
 
 
 def _lock_01_02(st: dict, sop: str = "诊断", root: Path | None = None) -> None:
@@ -408,7 +413,7 @@ def test_g1_goes_to_budget_not_measure() -> None:
     root = _root()
     engine.init_case("c4", root)
     st = engine.load_state("c4", root)
-    _lock_01_02(st)
+    _lock_01_02(st, "诊断", root)
     nxt = engine.next_action(st)
     assert nxt["stage"] == "07"
     assert nxt["folder"] == "流程/07 预算和资源管理"
@@ -419,7 +424,7 @@ def test_diagnosis_budget_cannot_include_intervention() -> None:
     root = _root()
     engine.init_case("c5", root)
     st = engine.load_state("c5", root)
-    _lock_01_02(st, "诊断")
+    _lock_01_02(st, "诊断", root)
     try:
         engine.apply_fields(
             st,
@@ -509,6 +514,8 @@ def test_guide_tells_human_where_and_order() -> None:
     st = engine.load_state("g1", root)
     briefing = engine.next_action(st)["briefing"]
     assert "先做" in briefing and "材料放哪" in briefing
+    assert "门 ?" not in briefing
+    assert guide.build_guide(st)["gate"] == "G0"
     assert "流程/01 客户初次洽谈/禁售清单.md" in briefing
     assert f"agent_pm/cases/g1/inbox/" in briefing
     assert "流程/10 项目文件/案件/g1/原始/01/" in briefing
@@ -572,7 +579,7 @@ def test_change_rewinds_and_allows_rewrite() -> None:
     root = _root()
     engine.init_case("ch1", root)
     st = engine.load_state("ch1", root)
-    _lock_01_02(st, "诊断")
+    _lock_01_02(st, "诊断", root)
     assert st["fields"]["owner"] == "编排"
     engine.apply_fields(
         st,
@@ -610,8 +617,8 @@ def test_sprint_cannot_lock_l1_at_g3() -> None:
     root = _root()
     engine.init_case("sp1", root)
     st = engine.load_state("sp1", root)
-    _lock_01_02(st, "冲刺")
-    _lock_07_08(st, "冲刺")
+    _lock_01_02(st, "冲刺", root)
+    _lock_07_08(st, "冲刺", root)
     try:
         _apply03(st, root, extra={"verdict_4": "确认性 L1"})
     except ValueError as e:
@@ -624,8 +631,8 @@ def test_demo_freeze_cannot_pass_other_project() -> None:
     root = _root()
     engine.init_case("df1", root)
     st = engine.load_state("df1", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     try:
         engine.apply_fields(
             st,
@@ -648,12 +655,12 @@ def test_demo_freeze_cannot_pass_other_project() -> None:
 def _to_sprint_g5(root: Path, case: str) -> dict:
     engine.init_case(case, root)
     st = engine.load_state(case, root)
-    _lock_01_02(st, "冲刺")
-    _lock_07_08(st, "冲刺")
+    _lock_01_02(st, "冲刺", root)
+    _lock_07_08(st, "冲刺", root)
     _apply03(st, root)
     _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     return st
 
 
@@ -732,8 +739,8 @@ def test_shared_freeze_not_runtime_fallback() -> None:
     root = _root()
     engine.init_case("sf1", root)
     st = engine.load_state("sf1", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     fid = "sf-shared-only"
     shared = engine.FREEZE_ROOT / fid
     shared.mkdir(parents=True, exist_ok=True)
@@ -807,45 +814,12 @@ def test_change_then_fresh_output_can_l1() -> None:
     root = _root()
     engine.init_case("rw1", root)
     st = engine.load_state("rw1", root)
-    engine.apply_fields(
-        st,
-        {
-            "fields": {
-                "vertical": "v",
-                "city": "c",
-                "client_code": "x",
-                "sop_stage_intent": "冲刺",
-                "ban_ack": "是",
-            }
-        },
-    )
-    engine.decide(st, "G0", "APPROVE", actor="human")
-    engine.apply_fields(
-        st,
-        {
-            "fields": {
-                "project_id": "P3",
-                "owner": "编排",
-                "sop_stage": "冲刺",
-                "primary_goal": "在无品牌发现问上提高被正确提及的概率",
-                "primary_endpoint": "p_mention",
-                "causal_claim": "descriptive_until_isolation",
-                "control_design": "监测组",
-                "success_rule_diagnosis": "描述基线",
-                "success_rule_sprint": "受控前后描述",
-                "success_rule_retain": "不能下结论",
-                "treat_need_ids": "N01",
-                "holdout_need_ids": "H01",
-                "platforms_required": "P0",
-            }
-        },
-    )
-    _dual_decide(st, "G1", None)
-    _lock_07_08(st, "冲刺")
+    _lock_01_02(st, "冲刺", root)
+    _lock_07_08(st, "冲刺", root)
     _apply03(st, root)
     _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     out = _write_signed_evidence(root, st)
     engine.apply_fields(
         st,
@@ -880,45 +854,12 @@ def test_change_then_partial_output_cannot_lift() -> None:
     root = _root()
     engine.init_case("rw2", root)
     st = engine.load_state("rw2", root)
-    engine.apply_fields(
-        st,
-        {
-            "fields": {
-                "vertical": "v",
-                "city": "c",
-                "client_code": "x",
-                "sop_stage_intent": "冲刺",
-                "ban_ack": "是",
-            }
-        },
-    )
-    engine.decide(st, "G0", "APPROVE", actor="human")
-    engine.apply_fields(
-        st,
-        {
-            "fields": {
-                "project_id": "P3",
-                "owner": "编排",
-                "sop_stage": "冲刺",
-                "primary_goal": "在无品牌发现问上提高被正确提及的概率",
-                "primary_endpoint": "p_mention",
-                "causal_claim": "descriptive_until_isolation",
-                "control_design": "监测组",
-                "success_rule_diagnosis": "描述基线",
-                "success_rule_sprint": "受控前后描述",
-                "success_rule_retain": "不能下结论",
-                "treat_need_ids": "N01",
-                "holdout_need_ids": "H01",
-                "platforms_required": "P0",
-            }
-        },
-    )
-    _dual_decide(st, "G1", None)
-    _lock_07_08(st, "冲刺")
+    _lock_01_02(st, "冲刺", root)
+    _lock_07_08(st, "冲刺", root)
     _apply03(st, root)
     _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     out = _write_signed_evidence(root, st)
     old_did = (out / "did.csv").read_bytes()
     old_cov = (out / "coverage.csv").read_bytes()
@@ -1001,8 +942,8 @@ def test_incomplete_freeze_and_fake_checksum_fail_g3() -> None:
     root = _root()
     engine.init_case("fzbad", root)
     st = engine.load_state("fzbad", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     fid = "empty-scalars"
     d = root / st["case_id"] / "measure" / "冻结" / fid
     d.mkdir(parents=True, exist_ok=True)
@@ -1060,12 +1001,12 @@ def test_l1_without_did_csv_fails() -> None:
     root = _root()
     engine.init_case("l1", root)
     st = engine.load_state("l1", root)
-    _lock_01_02(st, "冲刺")
-    _lock_07_08(st, "冲刺")
+    _lock_01_02(st, "冲刺", root)
+    _lock_07_08(st, "冲刺", root)
     _apply03(st, root)
     _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     try:
         engine.apply_fields(
             st,
@@ -1132,8 +1073,8 @@ def test_plan_hours_cannot_exceed_budget() -> None:
     root = _root()
     engine.init_case("ph1", root)
     st = engine.load_state("ph1", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     _apply03(st, root)
     _dual_decide(st, "G3", root)
     try:
@@ -1148,7 +1089,7 @@ def test_comms_api_primary_blocked() -> None:
     root = _root()
     engine.init_case("api1", root)
     st = engine.load_state("api1", root)
-    _lock_01_02(st, "诊断")
+    _lock_01_02(st, "诊断", root)
     engine.apply_fields(
         st,
         {"fields": {"budget_hours": "12", "budget_scope": "冻结+噪声+基线+抽检", "quote_excludes_l1": "是"}},
@@ -1217,14 +1158,14 @@ def test_unaccepted_delivery_cannot_close() -> None:
     root = _root()
     engine.init_case("ua1", root)
     st = engine.load_state("ua1", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     _apply03(st, root)
     _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
-    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G5", root)
     try:
         engine.apply_fields(
             st,
@@ -1246,14 +1187,14 @@ def test_delivery_checksum_must_match_case_files() -> None:
     root = _root()
     engine.init_case("ck1", root)
     st = engine.load_state("ck1", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     _apply03(st, root)
     _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
-    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G5", root)
     try:
         engine.apply_fields(
             st,
@@ -1336,27 +1277,14 @@ def test_close_cannot_reopen_l1() -> None:
 def _diag_to_g5(root: Path, case: str, *, seed_formal: bool = True) -> dict:
     engine.init_case(case, root)
     st = engine.load_state(case, root)
-    if seed_formal:
-        _lock_01_02(st, "诊断", root)
-        _lock_07_08(st, "诊断", root)
-    else:
-        _lock_01_02(st, "诊断")
-        _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     _apply03(st, root)
-    if seed_formal:
-        _approve(st, "G3", root)
-    else:
-        _dual_decide(st, "G3", root)
+    _approve(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
-    if seed_formal:
-        _approve(st, "G2", root)
-    else:
-        engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
-    if seed_formal:
-        _approve(st, "G5", root)
-    else:
-        engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G5", root)
     return st
 
 
@@ -1427,12 +1355,19 @@ def test_g4_rejects_foreign_identity() -> None:
 
 
 def test_g8_rejects_empty_formal() -> None:
+    import files as _files
+
     root = _root()
-    st = _diag_to_g5(root, "ef1", seed_formal=False)
+    st = _diag_to_g5(root, "ef1")
     engine.apply_fields(st, {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}}, cases_root=root)
     _dual_decide(st, "G4", root)
     _seed_closeout(root, st)
     _seed_deposit(root, st)
+    vault = _files.vault_path(st["case_id"], root)
+    _files._write_csv(vault / "正式" / "清单.csv", _files.DOC_FIELDS, [])
+    for p in (vault / "正式" / "现行").glob("*"):
+        if p.is_file():
+            p.unlink()
     try:
         engine.apply_fields(
             st,
@@ -1481,6 +1416,100 @@ def test_g8_rejects_missing_deposit() -> None:
         raise AssertionError("G8 must reject close without asset deposit")
 
 
+def test_gate_requires_registered_outputs() -> None:
+    root = _root()
+    engine.init_case("out1", root)
+    st = engine.load_state("out1", root)
+    engine.apply_fields(
+        st,
+        {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": "诊断", "ban_ack": "是"}},
+    )
+    try:
+        engine.decide(st, "G0", "APPROVE", actor="human", cases_root=root)
+    except ValueError as e:
+        assert "required outputs" in str(e) and "01_商机卡" in str(e)
+    else:
+        raise AssertionError("G0 without 01_商机卡 must fail")
+
+
+def test_dual_sign_keeps_first_packet() -> None:
+    root = _root()
+    engine.init_case("pkt1", root)
+    st = engine.load_state("pkt1", root)
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
+    _apply03(st, root)
+    _seed_stage_out(root, st)
+    engine.decide(
+        st,
+        "G3",
+        "APPROVE",
+        actor="human",
+        cases_root=root,
+        member="甲",
+        role="负责人",
+        decision_reason="冻结与出数已核",
+        evidence_checksum="abc",
+        quality_review_id="QR0001",
+    )
+    assert st["gates"]["G3"]["verdict"] == "PENDING_DUAL"
+    engine.decide(
+        st,
+        "G3",
+        "APPROVE",
+        actor="human",
+        cases_root=root,
+        member="乙",
+        role="测量复核",
+        decision_reason="",
+        evidence_checksum="",
+        quality_review_id="",
+    )
+    pkt = st["gates"]["G3"]
+    assert pkt["verdict"] == "APPROVE"
+    assert pkt["decision_reason"] == "冻结与出数已核"
+    assert pkt["evidence_checksum"]
+    assert pkt["quality_review_id"] == "QR0001"
+    assert "03_冻结包" in pkt["required_outputs"]
+
+
+def test_wait_days_must_be_integer() -> None:
+    root = _root()
+    st = _to_sprint_g5(root, "wd1")
+    try:
+        engine.apply_fields(
+            st,
+            {
+                "fields": {
+                    "intervention_class": "FAQ",
+                    "intervention_need_ids": "N01",
+                    "holdout_untouched": "是",
+                    "intervention_completed_on": "2026-01-01",
+                    "wait_days": "1.5",
+                    "verdict_4": "受控前后描述",
+                }
+            },
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "integer" in str(e)
+    else:
+        raise AssertionError("wait_days=1.5 must fail")
+
+
+def test_promote_profile_cli() -> None:
+    root = _root()
+    engine.init_case("pp1", root)
+    st = engine.load_state("pp1", root)
+    import teaching
+
+    teaching.set_profile(st, "新人", {"pm_level": 0, "geo_level": 0, "tool_level": 0})
+    engine.save_state(st, root)
+    assert run.main(["promote-profile", "pp1", "--member", "新人", "--axis", "pm_level", "--level", "1", "--cases-root", str(root)]) == 0
+    st2 = engine.load_state("pp1", root)
+    assert st2["profiles"]["新人"]["pm_level"] == 1
+
+
 if __name__ == "__main__":
     test_walk_order_is_full_process()
     test_human_cannot_apply()
@@ -1513,6 +1542,10 @@ if __name__ == "__main__":
     test_g8_rejects_empty_formal()
     test_g8_rejects_missing_closeout_drafts()
     test_g8_rejects_missing_deposit()
+    test_gate_requires_registered_outputs()
+    test_dual_sign_keeps_first_packet()
+    test_wait_days_must_be_integer()
+    test_promote_profile_cli()
     test_contradictory_did_cannot_l1()
     test_l1_without_did_csv_fails()
     print("ok")

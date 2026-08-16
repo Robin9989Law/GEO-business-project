@@ -10,6 +10,13 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+try:
+    from zoneinfo import ZoneInfo
+
+    PROJECT_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:  # pragma: no cover
+    PROJECT_TZ = timezone(timedelta(hours=8))
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = Path(__file__).resolve().parent / "cases"
 FIELDS_CSV = ROOT / "合同" / "核心合同字段.csv"
@@ -139,6 +146,11 @@ def utc_today():
     return datetime.now(timezone.utc).date()
 
 
+def project_today():
+    """等待期按项目时区 Asia/Shanghai 的日历日计算，不用 UTC。"""
+    return datetime.now(PROJECT_TZ).date()
+
+
 def parse_iso_date(val: object):
     raw = str(val or "").strip()[:10]
     try:
@@ -147,15 +159,24 @@ def parse_iso_date(val: object):
         return None
 
 
+def parse_wait_days(val: object) -> int | None:
+    raw = str(val or "").strip()
+    if not raw:
+        return None
+    if not raw.isdigit():
+        raise ValueError("wait_days must be an integer")
+    return int(raw)
+
+
 def sprint_wait_elapsed(fields: dict, today=None) -> bool:
     completed = parse_iso_date(fields.get("intervention_completed_on"))
     try:
-        wait = int(float(str(fields.get("wait_days") or "").strip()))
+        wait = parse_wait_days(fields.get("wait_days"))
     except ValueError:
         return False
-    if completed is None or wait < 1:
+    if completed is None or wait is None or wait < 1:
         return False
-    day = today or utc_today()
+    day = today or project_today()
     return completed + timedelta(days=wait) <= day
 
 
@@ -229,7 +250,7 @@ def next_action(state: dict) -> dict:
     import teaching as _teach
 
     _teach.ensure_process(state)
-    g = _guide.build_guide(state)
+    g = _guide.build_guide(state, member=str(state.get("current_member") or ""))
     return {
         "case_id": state["case_id"],
         "stage": stage,
@@ -452,8 +473,8 @@ def missing_required(
         if extra:
             miss.append("intervention_need_ids")
         try:
-            wait = float(str(fields.get("wait_days") or "").strip())
-            if wait < 1:
+            wait = parse_wait_days(fields.get("wait_days"))
+            if wait is None or wait < 1:
                 miss.append("wait_days")
         except ValueError:
             miss.append("wait_days")
@@ -587,20 +608,98 @@ def delivery_files_checksum(out_dir: Path) -> str:
     return h.hexdigest()[:16]
 
 
-def expected_formal_doc_ids() -> tuple[str, ...]:
-    """P0-3 同步：与 `合同/阶段交付物注册.md` / `files.STAGE_DELIVERABLES` 一致（09 除外）。
-
-    只列 required=True 的 doc_id。required=False 的（如 `05_干预轮次卡` 仅冲刺）按 sop_stage 动态决定。
-    """
+def required_stage_outputs(stage: str, sop: str = "") -> list[str]:
+    """当前阶段过门前必须齐的 doc_id，从阶段交付物注册表推导。"""
     import files as _files
+
+    ids: list[str] = []
+    for doc_id, info in _files.STAGE_DELIVERABLES.get(stage, {}).items():
+        if info.get("required"):
+            ids.append(doc_id)
+        elif doc_id == "05_干预轮次卡" and sop == "冲刺":
+            ids.append(doc_id)
+    return ids
+
+
+def expected_formal_doc_ids(sop: str = "") -> tuple[str, ...]:
+    """G8 累计：01–06 的 required 件。05_干预轮次卡仅冲刺计入。"""
     ids: list[str] = []
     for stage in STAGES:
         if stage == "09":
             break
-        for doc_id, info in _files.STAGE_DELIVERABLES.get(stage, {}).items():
-            if info.get("required"):
-                ids.append(doc_id)
+        ids.extend(required_stage_outputs(stage, sop))
     return tuple(ids)
+
+
+def find_stage_output(
+    case_id: str,
+    doc_id: str,
+    stage: str,
+    cases_root: Path | None,
+) -> Path | None:
+    import files as _files
+
+    vault = _files.vault_path(case_id, cases_root)
+    current = vault / "正式" / "现行"
+    if current.is_dir():
+        hits = sorted(current.glob(doc_id + ".*"))
+        if hits:
+            return hits[0]
+    out = (cases_root or DEFAULT_CASES) / case_id / "out"
+    for base in (out, out / stage):
+        if not base.is_dir():
+            continue
+        hits = sorted(base.glob(doc_id + ".*"))
+        if hits:
+            return hits[0]
+    if stage == "03":
+        if doc_id == "03_出数报告" and resolve_delivery_dir(case_id, cases_root):
+            return resolve_delivery_dir(case_id, cases_root)
+        if doc_id == "03_冻结包":
+            return None
+        env = None
+        if cases_root is not None:
+            env = Path(cases_root) / case_id / "measure" / "环境登记.txt"
+        if env is None or not env.is_file():
+            env = MEASURE_CASES / case_id / "环境登记.txt"
+        if doc_id == "03_环境登记" and env.is_file():
+            return env
+    return None
+
+
+def missing_gate_outputs(state: dict, cases_root: Path | None, *, current_only: bool = False) -> list[str]:
+    """过当前门前：本阶段必需件须在 out/ 或 现行；已过阶段须已是现行。"""
+    if cases_root is None:
+        return []
+    sop = str((state.get("fields") or {}).get("sop_stage") or "")
+    case_id = state.get("case_id") or ""
+    cur = state.get("stage") or ""
+    miss: list[str] = []
+    import files as _files
+
+    vault = _files.vault_path(case_id, cases_root)
+    current_dir = vault / "正式" / "现行"
+    has_current = current_dir.is_dir() and any(p.is_file() for p in current_dir.iterdir())
+    for stage in STAGES:
+        if stage == "09" and cur != "09":
+            continue
+        if STAGES.index(stage) > STAGES.index(cur):
+            break
+        for doc_id in required_stage_outputs(stage, sop):
+            if stage == cur or current_only:
+                if find_stage_output(case_id, doc_id, stage, cases_root) is None:
+                    if stage == "03" and doc_id == "03_冻结包":
+                        fid = str((state.get("fields") or {}).get("freeze_id") or "")
+                        if resolve_freeze_dir(fid, case_id, cases_root):
+                            continue
+                    miss.append(doc_id)
+                continue
+            if not has_current:
+                continue
+            hits = list(current_dir.glob(doc_id + ".*")) if current_dir.is_dir() else []
+            if not hits:
+                miss.append(doc_id)
+    return miss
 
 
 def _resolve_vault_file(vault: Path, rel_or_abs: str) -> Path:
@@ -634,7 +733,8 @@ def formal_docs_checksum_errors(
         return ["empty_manifest"]
     errs: list[str] = []
     by_id = {d.get("doc_id") or "": d for d in current}
-    for doc_id in expected_formal_doc_ids():
+    sop = str(((state or {}).get("fields") or {}).get("sop_stage") or "")
+    for doc_id in expected_formal_doc_ids(sop):
         if doc_id not in by_id:
             errs.append(f"missing:{doc_id}")
     gates = (state or {}).get("gates") or {}
@@ -1259,10 +1359,12 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
             merged_wait = _merged_fields(state, incoming, payload)
             if incoming.get("wait_days", state["fields"].get("wait_days")) is not None:
                 try:
-                    if float(str(incoming.get("wait_days", state["fields"].get("wait_days"))).strip()) < 1:
-                        _fail("wait_days must be >= 1")
+                    wait_n = parse_wait_days(incoming.get("wait_days", state["fields"].get("wait_days")))
                 except ValueError:
-                    _fail("wait_days must be a number")
+                    _fail("wait_days must be an integer")
+                else:
+                    if wait_n is None or wait_n < 1:
+                        _fail("wait_days must be >= 1")
             if incoming.get("verdict_4") and not sprint_wait_elapsed(merged_wait):
                 _fail("sprint wait period not elapsed")
     if stage == "03":
@@ -1355,6 +1457,38 @@ def _clear_from(state: dict, target: str, cases_root: Path | None = None) -> Non
     _files.invalidate_from(state["case_id"], later, cases_root)
 
 
+def _merge_gate_packet(existing: dict, incoming: dict, derived_outputs: list[str]) -> dict:
+    """第二次双签不得用空字段覆盖第一次留下的审计信息。"""
+    old_outs = [str(x) for x in (existing.get("required_outputs") or []) if str(x).strip()]
+    new_outs = [str(x) for x in (incoming.get("required_outputs") or []) if str(x).strip()]
+    outputs = list(dict.fromkeys([*derived_outputs, *old_outs, *new_outs]))
+    old_checks = dict(existing.get("hard_check_results") or {})
+    new_checks = dict(incoming.get("hard_check_results") or {})
+    old_checks.update({k: v for k, v in new_checks.items() if v not in (None, "", [], {})})
+    def _keep(key: str) -> str:
+        got = incoming.get(key)
+        if str(got or "").strip():
+            return str(got)
+        return str(existing.get(key) or "")
+
+    return {
+        "required_outputs": outputs,
+        "hard_check_results": old_checks,
+        "quality_review_id": _keep("quality_review_id"),
+        "evidence_checksum": _keep("evidence_checksum"),
+        "decision_reason": _keep("decision_reason"),
+    }
+
+
+def _default_evidence_checksum(state: dict, gate: str) -> str:
+    fields = state.get("fields") or {}
+    if gate in {"G4", "G8"}:
+        return str(fields.get("delivery_manifest_checksum") or "")
+    if gate == "G3":
+        return str(fields.get("config_checksum") or "")
+    return ""
+
+
 def decide(
     state: dict,
     gate: str,
@@ -1416,6 +1550,21 @@ def decide(
     if verdict == "CHANGE" and not change_payload:
         _fail("CHANGE requires change_payload with reason/affected_fields/etc")
 
+    existing = state["gates"].get(gate) or {}
+    sop = str((state.get("fields") or {}).get("sop_stage") or "")
+    derived_outputs = required_stage_outputs(state["stage"], sop)
+    packet = _merge_gate_packet(
+        existing,
+        {
+            "required_outputs": list(required_outputs or []),
+            "hard_check_results": dict(hard_check_results or {}),
+            "quality_review_id": quality_review_id,
+            "evidence_checksum": evidence_checksum,
+            "decision_reason": decision_reason,
+        },
+        derived_outputs,
+    )
+
     if verdict == "APPROVE":
         import review as _rv
 
@@ -1424,12 +1573,25 @@ def decide(
             _rv.validate_current_review_target(state, cases_root)
             if not _rv.stage_allows_apply(state):
                 _fail("review not passed")
+            if not packet["quality_review_id"]:
+                packet["quality_review_id"] = str((state.get("review") or {}).get("current_id") or "")
         miss = missing_required(state, cases_root=cases_root)
         if miss:
             _fail("missing required: " + ",".join(miss))
+        missing_outs = missing_gate_outputs(state, cases_root)
+        if missing_outs:
+            _fail("missing required outputs: " + ",".join(missing_outs))
+        if gate in GATE_DUAL_APPROVERS and not str(packet.get("decision_reason") or "").strip():
+            _fail(f"key gate {gate} requires decision_reason")
+        if not packet.get("evidence_checksum"):
+            packet["evidence_checksum"] = _default_evidence_checksum(state, gate)
+        checks = dict(packet.get("hard_check_results") or {})
+        checks.setdefault("required_fields", "ok")
+        checks.setdefault("required_outputs", "ok")
+        packet["hard_check_results"] = checks
+        packet["required_outputs"] = list(derived_outputs)
 
     # 关键门累积 approvers；非关键门单签
-    existing = state["gates"].get(gate) or {}
     approvers = list(existing.get("approvers") or [])
     if verdict in {"APPROVE", "REJECT"} and member and role:
         # 同 member+role 重复签 → fail；同 member 不同 role → 也 fail（关键门双签必须两人）
@@ -1443,18 +1605,18 @@ def decide(
         required_roles = GATE_REQUIRED_ROLES.get(gate, ())
         got_roles = {a["role"] for a in approvers}
         if not required_roles[0] in got_roles or not required_roles[1] in got_roles:
-            # 第一次：pending，不直接过门
+            # 第一次：pending，不直接过门；保留已填审计字段
             state["gates"][gate] = {
                 "gate_id": f"{gate}/{state['case_id']}",
                 "case_id": state["case_id"],
                 "stage": state["stage"],
                 "verdict": "PENDING_DUAL",
                 "approvers": approvers,
-                "required_outputs": list(required_outputs or []),
-                "hard_check_results": dict(hard_check_results or {}),
-                "quality_review_id": quality_review_id,
-                "evidence_checksum": evidence_checksum,
-                "decision_reason": decision_reason,
+                "required_outputs": packet["required_outputs"],
+                "hard_check_results": packet["hard_check_results"],
+                "quality_review_id": packet["quality_review_id"],
+                "evidence_checksum": packet["evidence_checksum"],
+                "decision_reason": packet["decision_reason"],
                 "at": now(),
                 "final": False,
             }
@@ -1470,11 +1632,11 @@ def decide(
         "stage": state["stage"],
         "verdict": final_verdict,
         "approvers": approvers,
-        "required_outputs": list(required_outputs or []),
-        "hard_check_results": dict(hard_check_results or {}),
-        "quality_review_id": quality_review_id,
-        "evidence_checksum": evidence_checksum,
-        "decision_reason": decision_reason,
+        "required_outputs": packet["required_outputs"],
+        "hard_check_results": packet["hard_check_results"],
+        "quality_review_id": packet["quality_review_id"],
+        "evidence_checksum": packet["evidence_checksum"],
+        "decision_reason": packet["decision_reason"],
         "at": now(),
         "final": is_final,
     }

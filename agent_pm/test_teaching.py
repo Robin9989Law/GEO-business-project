@@ -452,7 +452,7 @@ def test_novice_follows_guide_only() -> None:
         cases_root=root,
     )
     assert st["waiting"] == "human" and st["activity"] == "human_gate"
-    engine.decide(st, "G0", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G0", root)
     assert st["stage"] == "02"
     assert put.endswith("inbox/")
 

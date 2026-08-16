@@ -185,6 +185,24 @@ def check_8_verdict4_source_in_agents() -> list[str]:
     return issues
 
 
+def check_11_dual_roles() -> list[str]:
+    issues: list[str] = []
+    path = ROOT / "合同" / "关键门双角色表.md"
+    if not path.is_file():
+        return ["missing 合同/关键门双角色表.md"]
+    text = path.read_text(encoding="utf-8")
+    for gate, roles in engine.GATE_REQUIRED_ROLES.items():
+        if gate not in text:
+            issues.append(f"双角色表 missing {gate}")
+        for role in roles:
+            if role not in text:
+                issues.append(f"双角色表 missing role {role} for {gate}")
+    for gate in engine.GATE_DUAL_APPROVERS:
+        if gate not in text:
+            issues.append(f"双角色表 missing dual gate {gate}")
+    return issues
+
+
 def check_10_glossary() -> list[str]:
     issues: list[str] = []
     path = ROOT / "合同" / "术语表.md"
@@ -237,6 +255,7 @@ CHECKS = [
     ("verdict_4 写入规则在各 agent 提示词中一致", check_8_verdict4_source_in_agents),
     ("单位统一：人时（不允许裸'人天'）", check_9_unit_uniform),
     ("术语表覆盖关键概念", check_10_glossary),
+    ("关键门双角色表 ↔ engine.GATE_REQUIRED_ROLES", check_11_dual_roles),
 ]
 
 

@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
             "board",
             "check-vault",
             "profile",
+            "promote-profile",
             "review",
             "appeal",
             "resolve-review",
@@ -77,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--raw-id", dest="raw_id", default="")
     p.add_argument("--review-id", dest="review_id", default="")
     p.add_argument("--reason", default="")
+    p.add_argument("--axis", default="", help="promote-profile: pm_level / geo_level / tool_level")
+    p.add_argument("--level", default="", help="promote-profile: 0 / 1 / 2")
+    p.add_argument("--quality-review-id", dest="quality_review_id", default="")
+    p.add_argument("--evidence-checksum", dest="evidence_checksum", default="")
     args = p.parse_args(argv)
     root = _root(args)
     froot = _files_root(args)
@@ -191,6 +196,13 @@ def main(argv: list[str] | None = None) -> int:
             engine.save_state(state, root)
             _print(rec)
             return 0
+        if args.cmd == "promote-profile":
+            if not args.member or not args.axis or args.level == "":
+                raise SystemExit("promote-profile needs --member --axis pm_level|geo_level|tool_level --level 0|1|2")
+            rec = teaching.promote_profile(state, args.member, args.axis, int(args.level))
+            engine.save_state(state, root)
+            _print(rec)
+            return 0
         if args.cmd == "review":
             if not args.json_path:
                 raise SystemExit("review needs --json")
@@ -267,6 +279,8 @@ def main(argv: list[str] | None = None) -> int:
                 member=args.member,
                 role=args.role,
                 decision_reason=args.decision_reason,
+                quality_review_id=args.quality_review_id,
+                evidence_checksum=args.evidence_checksum,
                 change_payload=change_payload,
             )
             engine.save_state(state, root)

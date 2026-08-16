@@ -288,11 +288,12 @@ def test_10_key_gate_same_member_double_sign() -> None:
     _lock_01_02(st, "诊断", root)  # G1 已双签过
     _lock_07_08(st, "诊断", root)
     _apply03(st, root)
+    _seed_stage_out(root, st)
     # 第一次 G3：member=甲, role=负责人
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root, member="甲", role="负责人")
+    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root, member="甲", role="负责人", decision_reason="first sign")
     # 第二次 G3：member=甲（同一成员）, role=测量复核
     try:
-        engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root, member="甲", role="测量复核")
+        engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root, member="甲", role="测量复核", decision_reason="second sign")
     except ValueError as e:
         assert "already signed" in str(e) or "G3" in str(e)
         print("✅ #10 关键门同一成员双签必失败")
@@ -514,7 +515,7 @@ def test_14_agent_terms_match_registry() -> None:
     import subprocess
     r = subprocess.run(["python3", "工程/check_doc_consistency.py"], capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
     assert r.returncode == 0, f"跨文档一致性失败:\n{r.stdout}\n{r.stderr}"
-    assert "0 issues across 10 checks" in r.stdout
+    assert "0 issues across 11 checks" in r.stdout
     print("✅ #14 Agent 提示词术语与统一注册表一致")
 
 

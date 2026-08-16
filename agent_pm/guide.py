@@ -9,6 +9,74 @@ GATE_AFTER = _eng.GATE_AFTER
 STAGE_WINDOWS = _eng.STAGE_WINDOWS
 VERDICT_OK = _eng.VERDICT_OK
 STAGE_FOLDER = _eng.STAGE_FOLDER
+GATE_REQUIRED_ROLES = _eng.GATE_REQUIRED_ROLES
+GATE_DUAL_APPROVERS = _eng.GATE_DUAL_APPROVERS
+
+ROLE_CATALOG = {
+    "负责人": {
+        "can_approve_gates": ("G0", "G1", "G6", "G7", "G3", "G2", "G5", "G4", "G8"),
+        "can_apply": False,
+        "reads": ("formal", "raw", "board", "measure", "out"),
+        "writes": (),
+        "task": "审当前门并签字；关键门等第二角色副署",
+    },
+    "GEO/验收专业复核": {
+        "can_approve_gates": ("G1",),
+        "can_apply": False,
+        "reads": ("formal", "raw", "out"),
+        "writes": (),
+        "task": "复核章程/验收/需求规格，作为 G1 第二签字人",
+    },
+    "测量复核": {
+        "can_approve_gates": ("G3", "G4"),
+        "can_apply": False,
+        "reads": ("measure", "formal", "out"),
+        "writes": (),
+        "task": "复核冻结与出数身份，作为 G3/G4 第二签字人",
+    },
+    "文件/资产复核": {
+        "can_approve_gates": ("G8",),
+        "can_apply": False,
+        "reads": ("formal", "board", "measure"),
+        "writes": (),
+        "task": "复核正式清单、脱敏和资产移交，作为 G8 第二签字人",
+    },
+    "客户成功": {
+        "can_approve_gates": ("G7", "G4"),
+        "can_apply": False,
+        "reads": ("formal", "out", "board"),
+        "writes": (),
+        "task": "锁沟通口径；G4 可按 负责人/客户成功 签字",
+    },
+    "负责人/客户成功": {
+        "can_approve_gates": ("G4", "G7"),
+        "can_apply": False,
+        "reads": ("formal", "out", "board"),
+        "writes": (),
+        "task": "G4 第一签字人；确认客户已接收交付",
+    },
+    "操作员": {
+        "can_approve_gates": (),
+        "can_apply": False,
+        "reads": ("raw", "board", "measure"),
+        "writes": ("inbox", "samples"),
+        "task": "按清单采集、入库原始件；不签字",
+    },
+    "评分": {
+        "can_approve_gates": (),
+        "can_apply": False,
+        "reads": ("raw", "measure", "board"),
+        "writes": ("ledger",),
+        "task": "抽检/评分；取中转件；不签字",
+    },
+    "编排": {
+        "can_approve_gates": (),
+        "can_apply": True,
+        "reads": ("formal", "raw", "out", "board", "measure"),
+        "writes": ("apply", "out"),
+        "task": "按当前站 apply 字段、起草 out/；不得 APPROVE",
+    },
+}
 
 # 每阶段：先做什么 → 人做什么 → 材料放哪 → 然后做什么
 PLAYBOOK = {
@@ -179,7 +247,7 @@ PLAYBOOK = {
 }
 
 
-def build_guide(state: dict) -> dict:
+def build_guide(state: dict, member: str = "", role: str = "") -> dict:
     case = state.get("case_id") or "CASE"
     stage = state.get("stage") or "01"
     waiting = state.get("waiting") or "agent"
@@ -189,24 +257,44 @@ def build_guide(state: dict) -> dict:
     mats = []
     for m in book["materials"]:
         mats.append({k: v.replace("{case}", case) for k, v in m.items()})
+    gate = GATE_AFTER.get(stage, "")
     if waiting == "done":
         now = "全流程已结束。你只做最终抽查：出数报告有没有禁售句、四选一有没有超 sop_stage、资产库有没有客户事实。"
-        role = "human_review"
+        role_now = "human_review"
     elif waiting == "human":
-        gate = GATE_AFTER.get(stage, "")
         now = f"材料已齐或草稿已写。请你审核后决策 {gate}：APPROVE / REJECT / CHANGE。"
-        role = "human_decide"
+        role_now = "human_decide"
     else:
         now = f"现在轮到 Agent 写 {stage} 字段。请你按「先做」准备材料，放到指定目录，不要自己改 state.json。"
-        role = "human_prepare"
+        role_now = "human_prepare"
     allowed = sorted(STAGE_WINDOWS.get(sop, ())) if sop in STAGE_WINDOWS else []
     verdicts = sorted(VERDICT_OK.get(sop, ())) if sop in VERDICT_OK else []
     import teaching as _teach
 
-    proc = _teach.process_guide(state)
+    member = (member or state.get("current_member") or "").strip()
+    proc = _teach.process_guide(state, member)
+    required = _eng.required_stage_outputs(stage, sop if sop in STAGE_WINDOWS else "")
+    approver_roles = list(GATE_REQUIRED_ROLES.get(gate, ()))
+    if not approver_roles:
+        approver_roles = ["负责人"]
+    role_name = (role or "").strip()
+    role_view = dict(ROLE_CATALOG.get(role_name) or {})
+    if role_view:
+        role_view = {
+            **role_view,
+            "role": role_name,
+            "member": member,
+            "can_sign_now": waiting == "human" and gate in (role_view.get("can_approve_gates") or ()),
+        }
+    human_does = list(book["human_does"])
+    if role_view:
+        human_does = [role_view.get("task") or ""] + human_does
+        if waiting == "human" and not role_view.get("can_sign_now"):
+            human_does.append(f"你的角色 {role_name} 不能签 {gate}；本门签字人：{' + '.join(approver_roles)}")
     return {
         "case_id": case,
         "stage": stage,
+        "gate": gate,
         "folder": STAGE_FOLDER.get(stage, stage),
         "title": book["title"],
         "sop_stage": sop,
@@ -215,14 +303,18 @@ def build_guide(state: dict) -> dict:
         "mode": proc["mode"],
         "teach_focus": proc["teach_focus"],
         "process": proc,
-        "role_now": role,
+        "role_now": role_now,
         "now": now,
         "do_first": list(book["do_first"]),
-        "human_does": list(book["human_does"]),
+        "human_does": human_does,
         "materials": mats,
         "then": book["then"],
         "allowed_windows": allowed,
         "allowed_verdicts": verdicts,
+        "required_outputs": required,
+        "approver_roles": approver_roles,
+        "dual_gate": gate in GATE_DUAL_APPROVERS,
+        "role_view": role_view,
         "freeze_id": fields.get("freeze_id") or "（尚未冻结）",
         "budget_hours": fields.get("budget_hours") or "（07 尚未锁定）",
         "put_inbox": f"agent_pm/cases/{case}/inbox/",
@@ -270,7 +362,19 @@ def format_guide(g: dict) -> str:
     lines.append("硬规则：见 `合同/核心合同.md §1` 与该 stage `agent_pm/agents/*.md` 的 hard_rules；Agent 不替人 APPROVE。")
     lines.append(f"质检维度：完整 / 准确 / 一致 / 可追溯 / 无泄漏。")
     lines += ["", "## 6. 过门产出（formal_outputs；见 `合同/阶段交付物注册.md`）"]
-    lines.append(f"门 {g.get('gate','?')} / `then`={g.get('then','')}")
+    gate = g.get("gate") or ""
+    dual = "双签" if g.get("dual_gate") else "单签"
+    roles = " + ".join(g.get("approver_roles") or [])
+    outs = "、".join(g.get("required_outputs") or []) or "（本步无注册必需件）"
+    lines.append(f"门 {gate or '—'}（{dual}；签字角色：{roles or '负责人'}） / `then`={g.get('then','')}")
+    lines.append(f"本门必需正式件：{outs}")
+    view = g.get("role_view") or {}
+    if view:
+        lines.append(
+            f"当前角色 {view.get('role')}：可签 {', '.join(view.get('can_approve_gates') or ()) or '无'}；"
+            f"可读 {', '.join(view.get('reads') or ())}；可写 {', '.join(view.get('writes') or ()) or '无'}；"
+            f"现在能签={'是' if view.get('can_sign_now') else '否'}"
+        )
     lines += ["", "## 7. 下一站（handoff_to）"]
     lines.append(f"完成本步后由引擎推进到下一 stage；详见 `合同/核心合同.md` 行走顺序。")
     if g.get("budget_hours"):
