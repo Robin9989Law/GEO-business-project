@@ -48,19 +48,19 @@ PLAYBOOK = {
         "then": "Agent 锁定字段后，你审 G1。通过后进 07 预算，还不到 03 采集",
     },
     "07": {
-        "title": "预算与人天（测量前锁定）",
+        "title": "预算与人时（测量前锁定）",
         "do_first": [
             "必须已过 G1，sop_stage / 平台 / need 已锁",
-            "先按 platforms_required × 激活问法 × 本产品线允许的窗估人天，再谈价",
+            "先按 platforms_required × 激活问法 × 本产品线允许的窗估人时，再谈价",
             "诊断单不得把一类证据 / 改页写进必做行",
         ],
         "human_does": [
-            "提供可用人天、单价口径（不要把客户成交价写进通用模板）",
+            "提供可用人时、单价口径（不要把客户成交价写进通用模板）",
             "确认报价排除确认性 L1：quote_excludes_l1=是",
             "诊断：预算范围只能覆盖冻结、噪声、基线、抽检、收尾",
         ],
         "materials": [
-            {"item": "人手与单价约束", "put_at": "agent_pm/cases/{case}/inbox/07_人手.md", "why": "填预算表人天"},
+            {"item": "人手与单价约束", "put_at": "agent_pm/cases/{case}/inbox/07_人手.md", "why": "填预算表人时"},
             {"item": "预算表（本案副本）", "put_at": "agent_pm/cases/{case}/out/07_预算.md", "why": "G6 审的就是这个；对照 流程/07 预算和资源管理/预算表.csv 与 工时标准.md"},
         ],
         "then": "你审 G6。通过后进 08 沟通立项，再才进 03 测量",
@@ -88,7 +88,7 @@ PLAYBOOK = {
         "do_first": [
             "必须已过 G1、G6、G7：需求、预算、沟通都已锁",
             "从共享配置复制到本案后冻结：freeze_config --case-id 本案；未冻结不准采",
-            "先采噪声底，再谈涨跌。冲刺本步不做复测",
+            "先采噪声底，再谈涨跌。冲刺本步只写 baseline_verdict_4；最终 verdict_4 在 05 复测后写",
         ],
         "human_does": [
             "准备真机、干净号、定位切到合同里的城市",
@@ -103,17 +103,17 @@ PLAYBOOK = {
             {"item": "评分", "put_at": "流程/03 测量/案件/{case}/台账/samples.csv", "why": "出数分母"},
             {"item": "出数", "put_at": "流程/03 测量/案件/{case}/出数/", "why": "rollup --case-id --project-id"},
         ],
-        "then": "Agent 跑冻结、噪声、基线出数；你审 G3。冲刺不要在本步复测或写确认性 L1",
+        "then": "Agent 跑冻结、噪声、基线出数；你审 G3。诊断/续约：本步写 baseline_verdict_4 与 verdict_4；冲刺：本步只写 baseline_verdict_4，不要写最终 verdict_4 或确认性 L1",
     },
     "04": {
         "title": "计划只排测量允许的窗，且不超 07 预算",
         "do_first": [
             "必须已有 freeze_id、sop_stage、07 的 budget_hours",
-            "先看 03 允许的任务，再排人天；人天不得超出 G6 已批预算",
+            "先看 03 允许的任务，再排人时；人时不得超出 G6 已批预算",
         ],
         "human_does": [
             "核对进度里没有超出 sop_stage 的窗（诊断不得有干预窗）",
-            "按 platforms_required × 激活问法看人天是否够，且 ≤ budget_hours",
+            "按 platforms_required × 激活问法看人时是否够，且 ≤ budget_hours",
         ],
         "materials": [
             {"item": "WBS/进度草稿", "put_at": "agent_pm/cases/{case}/out/04_进度.md", "why": "G2 审的就是这个"},
@@ -130,7 +130,7 @@ PLAYBOOK = {
         "human_does": [
             "诊断：不要改客户页、不要发新文",
             "冲刺：只改 treat_need_ids 对应页面，监测组不改",
-            "周报四选一必须与 03 的 verdict_4 相同，不要自己升级",
+            "周报 verdict_4：诊断/续约=03 已锁；冲刺=本步复测（不等于 03 baseline），不要自己升级",
         ],
         "materials": [
             {"item": "干预完成日与类型（仅冲刺）", "put_at": "流程/03 测量/案件/{case}/冻结/{freeze}/intervention_ledger.csv", "why": "复测对得上日期"},
@@ -234,45 +234,71 @@ def build_guide(state: dict) -> dict:
 
 
 def format_guide(g: dict) -> str:
+    """P2-2: 固定 8 段输出格式（now/任务/交什么/放哪/检查什么/产出/下一站/不能做）。"""
     lines = [
         f"# 下一步（{g['case_id']}）",
         f"阶段：{g['stage']} {g.get('folder', '')} {g['title']}　产品线：{g['sop_stage']}　冻结：{g['freeze_id']}",
         f"现在：{g['now']}",
         f"活动：{g.get('activity') or ''}　教学深度：{g.get('mode') or 'standard'}（讲解由 Agent 做）　本步重点：{g.get('teach_focus') or ''}",
         "",
-        "## 先做（顺序不要倒）",
+        "## 1. 现在在哪",
+        f"阶段 {g['stage']} / {g.get('title','')} / 产品线 {g['sop_stage']} / 冻结 {g['freeze_id']}",
+        "",
+        "## 2. 当前唯一任务（先做；顺序不要倒）",
     ]
     for i, x in enumerate(g["do_first"], 1):
         lines.append(f"{i}. {x}")
-    lines += ["", "## 需要你做"]
+    lines += ["", "## 3. 人要交什么（需要你做）"]
     for i, x in enumerate(g["human_does"], 1):
         lines.append(f"{i}. {x}")
-    lines += ["", "## 材料放哪"]
+    lines += ["", "## 4. 材料放哪"]
     for m in g["materials"]:
         lines.append(f"- {m['item']} → `{m['put_at']}` （{m['why']}）")
     lines += [
-        f"- 本步inbox（先丢这里，Agent 必须转入原始库）：`{g['put_inbox']}`",
+        f"- 本步inbox：`{g['put_inbox']}`",
         f"- 原始资料归宿：`{g.get('put_raw', '')}`",
         f"- 正式现行：`{g.get('put_formal', '')}`",
         f"- 成员中转看板：`{g.get('put_board', '')}`",
         f"- Agent产出：`{g['put_out']}`（过门后发布进正式库）",
         "",
-        f"## 然后：{g['then']}",
+        "## 5. Agent 检查什么（硬规则 + 质检维度）",
     ]
     proc = g.get("process") or {}
-    if proc.get("ask_onboarding"):
-        lines += ["", "## 开单先问（答完再交材料）"]
-        for q in proc.get("onboarding_questions") or []:
-            lines.append(f"- {q}")
-    if proc.get("slots"):
-        lines += ["", "## 本轮流程槽（讲解由 Agent 填，不要让人自己翻 SOP）"]
-        for i, slot in enumerate(proc["slots"], 1):
-            lines.append(f"{i}. {slot}")
-        lines.append(f"标准流程：{proc.get('flow') or ''}")
+    axis = (proc.get("axis_depth") or {})
+    if axis:
+        lines.append(f"PM 轴={axis.get('pm','?')}（白话={'是' if axis.get('pm_explain') else '否'}）/ GEO 轴={axis.get('geo','?')}（白话={'是' if axis.get('geo_explain') else '否'}）/ Tool 轴={axis.get('tool','?')}（白话={'是' if axis.get('tool_explain') else '否'}）")
+    lines.append("硬规则：见 `合同/核心合同.md §1` 与该 stage `agent_pm/agents/*.md` 的 hard_rules；Agent 不替人 APPROVE。")
+    lines.append(f"质检维度：完整 / 准确 / 一致 / 可追溯 / 无泄漏。")
+    lines += ["", "## 6. 过门产出（formal_outputs；见 `合同/阶段交付物注册.md`）"]
+    lines.append(f"门 {g.get('gate','?')} / `then`={g.get('then','')}")
+    lines += ["", "## 7. 下一站（handoff_to）"]
+    lines.append(f"完成本步后由引擎推进到下一 stage；详见 `合同/核心合同.md` 行走顺序。")
     if g.get("budget_hours"):
-        lines.append(f"已锁人天：{g['budget_hours']}")
+        lines.append(f"已锁人时：{g['budget_hours']}")
     if g["allowed_windows"]:
         lines.append(f"本产品线允许的窗：{', '.join(g['allowed_windows'])}")
     if g["allowed_verdicts"]:
         lines.append(f"本产品线允许的四选一：{', '.join(g['allowed_verdicts'])}")
+    lines += ["", "## 8. 不能做什么（must_not）"]
+    lines.append("- 写禁售句（保证推荐 / 报名因此增长 / 国内可见性 / GEO 已证明 / 已经优化成功 / 优化后会涨）")
+    lines.append("- 替人 APPROVE；人只 `decide --actor human`")
+    lines.append("- 跳过 07/08 直接进 03；06 之后宣布结案")
+    lines.append("- 改现行正式件前不 checkout；改阶段字段前不读中转看板")
+    sop = g.get("sop_stage", "")
+    if sop == "诊断":
+        lines.append("- 诊断单：不得改页 / 不得发新文 / 不得把干预或 L1 写进 07 预算 / 05 报告 / 06 交付")
+    elif sop == "冲刺":
+        lines.append("- 冲刺单：03 阶段不得写最终 verdict_4；只动 treat_need_ids 对应页面；holdout_need_ids 不动")
+    elif sop == "续约":
+        lines.append("- 续约单：不开因果；不开处理组；周报不得用结项重开 L1")
+    lines += ["", "## 附录：开单先问 / 流程槽"]
+    if proc.get("ask_onboarding"):
+        lines += ["", "### 开单先问（答完再交材料）"]
+        for q in proc.get("onboarding_questions") or []:
+            lines.append(f"- {q}")
+    if proc.get("slots"):
+        lines += ["", "### 本轮流程槽（讲解由 Agent 填，不要让人自己翻 SOP）"]
+        for i, slot in enumerate(proc["slots"], 1):
+            lines.append(f"{i}. {slot}")
+        lines.append(f"标准流程：{proc.get('flow') or ''}")
     return "\n".join(lines) + "\n"

@@ -28,6 +28,15 @@ GATE_AFTER = {
     "06": "G4",
     "09": "G8",
 }
+# 关键门：必须双角色审批（详见 报告 P1 §1）
+GATE_DUAL_APPROVERS = frozenset({"G1", "G3", "G4", "G8"})
+# 关键门需要的角色集合（两个角色必须不同）
+GATE_REQUIRED_ROLES = {
+    "G1": ("负责人", "GEO/验收专业复核"),
+    "G3": ("负责人", "测量复核"),
+    "G4": ("负责人/客户成功", "测量复核"),
+    "G8": ("负责人", "文件/资产复核"),
+}
 AGENT_PROMPT = {
     "01": "agent_pm/agents/01_intake.md",
     "02": "agent_pm/agents/02_requirements.md",
@@ -72,6 +81,18 @@ BANNED_CLAIMS = (
 )
 YES = frozenset({"是", "yes", "true", "1", "Y", "y"})
 DIAG_BUDGET_BAN = ("干预", "一类证据", "改页")
+PRIMARY_GOAL_TEXT = "在无品牌发现问上提高被正确提及的概率"
+CAUSAL_CLAIM_OK = frozenset({"descriptive_until_isolation", "did_isolated", "pre_registered_did"})
+SUCCESS_RULE_OK = {
+    "success_rule_diagnosis": frozenset({"描述基线", "不能下结论"}),
+    "success_rule_sprint": frozenset({"受控前后描述", "确认性 L1", "不能下结论"}),
+    "success_rule_retain": frozenset({"不能下结论"}),
+}
+BUDGET_SCOPE_OK = {
+    "诊断": frozenset({"冻结", "噪声", "基线", "抽检", "收尾"}),
+    "冲刺": frozenset({"冻结", "噪声", "基线", "抽检", "收尾", "干预", "一类证据", "复测", "等待"}),
+    "续约": frozenset({"weekly", "calib", "监测", "收尾"}),
+}
 REQUIRED = {
     "01": ("vertical", "city", "client_code", "sop_stage_intent", "ban_ack"),
     "02": (
@@ -102,15 +123,15 @@ FREEZE_ROOT = ROOT / "流程" / "03 测量" / "配置" / "冻结"
 MEASURE_CASES = ROOT / "流程" / "03 测量" / "案件"
 
 
-def load_writers(path: Path = FIELDS_CSV) -> dict[str, str]:
-    out: dict[str, str] = {}
+def load_writers(path: Path = FIELDS_CSV) -> dict[str, frozenset]:
+    out: dict[str, frozenset] = {}
     with path.open(encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             field = (row.get("field") or "").strip()
             stage = (row.get("writer_stage") or "").strip()
             if field and stage:
-                out[field] = stage
-    out.setdefault("sop_stage_intent", "01")
+                out[field] = frozenset(s for s in stage.split("|") if s)
+    out.setdefault("sop_stage_intent", frozenset({"01"}))
     return out
 
 
@@ -193,7 +214,7 @@ def next_action(state: dict) -> dict:
         "activity": state.get("activity") or "onboarding",
         "gate": GATE_AFTER[stage] if state["waiting"] == "human" else "",
         "agent_prompt": AGENT_PROMPT[stage],
-        "writable_fields": [f for f, s in load_writers().items() if s == stage],
+        "writable_fields": [f for f, s in load_writers().items() if stage in s],
         "human_only": state["waiting"] == "human",
         "guide": g,
         "briefing": _guide.format_guide(g),
@@ -299,12 +320,12 @@ def isolate_measure_case(case_id: str, freeze_id: str, cases_root: Path | None =
     return d
 
 
-def _owner_for(key: str, stage: str, sop: str) -> str | None:
+def _owner_for(key: str, stage: str, sop: str) -> frozenset | None:
     writers = load_writers()
     if key == "verdict_4" and sop == "冲刺":
-        return "05"
+        return frozenset({"05"})
     if key == "verdict_4":
-        return "03"
+        return frozenset({"03"})
     return writers.get(key)
 
 
@@ -487,11 +508,18 @@ def delivery_files_checksum(out_dir: Path) -> str:
 
 
 def expected_formal_doc_ids() -> tuple[str, ...]:
+    """P0-3 同步：与 `合同/阶段交付物注册.md` / `files.STAGE_DELIVERABLES` 一致（09 除外）。
+
+    只列 required=True 的 doc_id。required=False 的（如 `05_干预轮次卡` 仅冲刺）按 sop_stage 动态决定。
+    """
+    import files as _files
     ids: list[str] = []
     for stage in STAGES:
         if stage == "09":
             break
-        ids.extend(EXPECTED_FORMAL_DOCS.get(stage, ()))
+        for doc_id, info in _files.STAGE_DELIVERABLES.get(stage, {}).items():
+            if info.get("required"):
+                ids.append(doc_id)
     return tuple(ids)
 
 
@@ -1033,11 +1061,11 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
         if owner is None and key not in writers:
             _fail(f"unknown field {key}")
         if owner is None:
-            owner = writers.get(key)
+            owner = writers.get(key) or frozenset()
         prev = state["fields"].get(key)
-        if owner != stage:
+        if stage not in owner:
             if prev is None or str(incoming[key]) != str(prev):
-                _fail(f"{key} owned by {owner}, current {stage}")
+                _fail(f"{key} owned by {sorted(owner)}, current {stage}")
         text = str(incoming[key])
         for bad in BANNED_CLAIMS:
             if bad in text:
@@ -1054,11 +1082,50 @@ def apply_fields(state: dict, payload: dict, actor: str = "agent", cases_root: P
             _fail(f"bad sop_stage {locked}")
         if intent and locked != intent and locked not in NARROW.get(intent, ()):
             _fail(f"cannot widen sop_stage {intent} -> {locked}")
+    if stage == "02":
+        goal = incoming.get("primary_goal", state["fields"].get("primary_goal"))
+        if goal is not None and str(goal).strip() != PRIMARY_GOAL_TEXT:
+            _fail(f"primary_goal must be '{PRIMARY_GOAL_TEXT}'")
+        ep = incoming.get("primary_endpoint", state["fields"].get("primary_endpoint"))
+        if ep is not None and str(ep).strip() != "p_mention":
+            _fail("primary_endpoint must be p_mention")
+        cc = incoming.get("causal_claim", state["fields"].get("causal_claim"))
+        if cc is not None and str(cc).strip() not in CAUSAL_CLAIM_OK:
+            _fail(f"causal_claim must be one of {sorted(CAUSAL_CLAIM_OK)}")
+        cd = incoming.get("control_design", state["fields"].get("control_design"))
+        if cd is not None:
+            cd_s = str(cd).strip()
+            if cd_s != "监测组":
+                _fail("control_design must be 监测组")
+            if "反事实" in cd_s:
+                _fail("control_design must not be called 反事实")
+        sr_d = incoming.get("success_rule_diagnosis", state["fields"].get("success_rule_diagnosis"))
+        if sr_d is not None and str(sr_d).strip() not in SUCCESS_RULE_OK["success_rule_diagnosis"]:
+            _fail(f"success_rule_diagnosis must be in {sorted(SUCCESS_RULE_OK['success_rule_diagnosis'])}")
+        sr_s = incoming.get("success_rule_sprint", state["fields"].get("success_rule_sprint"))
+        if sr_s is not None and str(sr_s).strip() not in SUCCESS_RULE_OK["success_rule_sprint"]:
+            _fail(f"success_rule_sprint must be in {sorted(SUCCESS_RULE_OK['success_rule_sprint'])}")
+        sr_r = incoming.get("success_rule_retain", state["fields"].get("success_rule_retain"))
+        if sr_r is not None and str(sr_r).strip() not in SUCCESS_RULE_OK["success_rule_retain"]:
+            _fail(f"success_rule_retain must be in {sorted(SUCCESS_RULE_OK['success_rule_retain'])}")
+        plats = incoming.get("platforms_required", state["fields"].get("platforms_required"))
+        if plats is not None:
+            pset = _norm_ids(plats)
+            if not pset:
+                _fail("platforms_required must be a non-empty set")
     if stage == "07":
         sop = state["fields"].get("sop_stage")
         scope = str(incoming.get("budget_scope", state["fields"].get("budget_scope", "")))
         if sop == "诊断" and any(tok in scope for tok in DIAG_BUDGET_BAN):
             _fail("diagnosis budget cannot include intervention")
+        if sop in BUDGET_SCOPE_OK and scope:
+            allowed = BUDGET_SCOPE_OK[sop]
+            for tok in scope.replace("，", ",").replace("+", ",").split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                if tok not in allowed:
+                    _fail(f"budget_scope token '{tok}' not in {sop} allowed set {sorted(allowed)}")
         quote = incoming.get("quote_excludes_l1", state["fields"].get("quote_excludes_l1"))
         if quote is not None and not _is_yes(quote):
             _fail("quote must exclude L1")
@@ -1184,8 +1251,8 @@ def _clear_from(state: dict, target: str, cases_root: Path | None = None) -> Non
     sop = state["fields"].get("sop_stage") or ""
     drop = []
     for key in list(state["fields"]):
-        owner = _owner_for(key, target, sop) or writers.get(key)
-        if owner in later:
+        owner = _owner_for(key, target, sop) or writers.get(key) or frozenset()
+        if owner & later:
             drop.append(key)
     for key in drop:
         state["fields"].pop(key, None)
@@ -1211,7 +1278,36 @@ def decide(
     actor: str = "human",
     cases_root: Path | None = None,
     rewind_to: str | None = None,
+    member: str = "",
+    role: str = "",
+    decision_reason: str = "",
+    required_outputs: list | None = None,
+    hard_check_results: dict | None = None,
+    quality_review_id: str = "",
+    evidence_checksum: str = "",
+    change_payload: dict | None = None,
 ) -> dict:
+    """P1: 完整 Gate Packet + 关键门双签 + CHANGE 影响分析。
+
+    参数:
+      member: 签字人代号（必填；关键门必须两次不同 member）
+      role: 签字人角色（必填；必须在 GATE_REQUIRED_ROLES[gate] 中）
+      decision_reason: 决策原因（建议填；空时 log 警告）
+      required_outputs: 必填的产出 doc_id 列表（用于审计）
+      hard_check_results: 硬规则检查结果（dict）
+      quality_review_id: 质检记录 ID（由 review 模块填）
+      evidence_checksum: 证据/出数校验和
+      change_payload: 当 verdict="CHANGE" 时的影响分析 dict：
+        - reason: 变更原因
+        - affected_fields: 受影响字段
+        - affected_docs: 受影响正式件 doc_id
+        - evidence_affected: 受影响测量证据
+        - re_freeze_needed: bool
+        - re_budget_needed: bool
+        - re_comms_needed: bool
+        - invalidated: 作废清单（list）
+        - new_versions: 新版本号（dict）
+    """
     if actor != "human" and verdict == "APPROVE":
         _fail("only human may APPROVE")
     need = GATE_AFTER[state["stage"]]
@@ -1224,6 +1320,18 @@ def decide(
             _fail("nothing for human to decide")
     if verdict not in {"APPROVE", "REJECT", "CHANGE"}:
         _fail(f"bad verdict {verdict}")
+
+    # 关键门：必须 member + role
+    if gate in GATE_DUAL_APPROVERS:
+        if not member or not role:
+            _fail(f"key gate {gate} requires member and role (dual approvers)")
+        if role not in GATE_REQUIRED_ROLES.get(gate, ()):
+            _fail(f"role {role} not allowed for {gate}; allowed={GATE_REQUIRED_ROLES.get(gate)}")
+
+    # CHANGE 必带 change_payload
+    if verdict == "CHANGE" and not change_payload:
+        _fail("CHANGE requires change_payload with reason/affected_fields/etc")
+
     if verdict == "APPROVE":
         import review as _rv
 
@@ -1235,8 +1343,74 @@ def decide(
         miss = missing_required(state, cases_root=cases_root)
         if miss:
             _fail("missing required: " + ",".join(miss))
-    state["gates"][gate] = {"verdict": verdict, "actor": actor, "at": now()}
-    state["log"].append({"at": now(), "op": "decide", "gate": gate, "verdict": verdict})
+
+    # 关键门累积 approvers；非关键门单签
+    existing = state["gates"].get(gate) or {}
+    approvers = list(existing.get("approvers") or [])
+    if verdict in {"APPROVE", "REJECT"} and member and role:
+        # 同 member+role 重复签 → fail；同 member 不同 role → 也 fail（关键门双签必须两人）
+        if any(a.get("member") == member and a.get("role") == role for a in approvers):
+            _fail(f"member {member}/{role} already signed {gate}")
+        if gate in GATE_DUAL_APPROVERS and any(a.get("member") == member for a in approvers):
+            _fail(f"member {member} already signed {gate}; key gate requires two distinct members")
+        approvers.append({"member": member, "role": role, "at": now()})
+
+    if gate in GATE_DUAL_APPROVERS and verdict == "APPROVE":
+        required_roles = GATE_REQUIRED_ROLES.get(gate, ())
+        got_roles = {a["role"] for a in approvers}
+        if not required_roles[0] in got_roles or not required_roles[1] in got_roles:
+            # 第一次：pending，不直接过门
+            state["gates"][gate] = {
+                "gate_id": f"{gate}/{state['case_id']}",
+                "case_id": state["case_id"],
+                "stage": state["stage"],
+                "verdict": "PENDING_DUAL",
+                "approvers": approvers,
+                "required_outputs": list(required_outputs or []),
+                "hard_check_results": dict(hard_check_results or {}),
+                "quality_review_id": quality_review_id,
+                "evidence_checksum": evidence_checksum,
+                "decision_reason": decision_reason,
+                "at": now(),
+                "final": False,
+            }
+            state["log"].append({"at": now(), "op": "decide_partial", "gate": gate, "member": member, "role": role})
+            return state
+
+    # 单签门 OR 关键门第二次 / REJECT / CHANGE → 写最终 packet
+    final_verdict = verdict
+    is_final = True
+    state["gates"][gate] = {
+        "gate_id": f"{gate}/{state['case_id']}",
+        "case_id": state["case_id"],
+        "stage": state["stage"],
+        "verdict": final_verdict,
+        "approvers": approvers,
+        "required_outputs": list(required_outputs or []),
+        "hard_check_results": dict(hard_check_results or {}),
+        "quality_review_id": quality_review_id,
+        "evidence_checksum": evidence_checksum,
+        "decision_reason": decision_reason,
+        "at": now(),
+        "final": is_final,
+    }
+    state["log"].append({"at": now(), "op": "decide", "gate": gate, "verdict": verdict, "member": member, "role": role})
+
+    if verdict == "CHANGE":
+        cp = dict(change_payload or {})
+        cp["at"] = now()
+        cp["gate"] = gate
+        cp["stage"] = state["stage"]
+        cp["rewind_to"] = rewind_to or state["stage"]
+        state.setdefault("changes", []).append(cp)
+        target = rewind_to or state["stage"]
+        if target not in STAGES:
+            _fail(f"bad rewind_to {target}")
+        if STAGES.index(target) > STAGES.index(state["stage"]):
+            _fail("cannot CHANGE forward")
+        _clear_from(state, target, cases_root)
+        return state
+
     if verdict == "APPROVE":
         import files as _files
         import review as _rv
@@ -1253,13 +1427,6 @@ def decide(
     elif verdict == "REJECT":
         state["waiting"] = "agent"
         state["activity"] = "agent_draft" if (state.get("review") or {}).get("current_result") in {"PASS", "OVERRIDE_SOFT"} else "material_pending"
-    else:
-        target = rewind_to or state["stage"]
-        if target not in STAGES:
-            _fail(f"bad rewind_to {target}")
-        if STAGES.index(target) > STAGES.index(state["stage"]):
-            _fail("cannot CHANGE forward")
-        _clear_from(state, target, cases_root)
     return state
 
 

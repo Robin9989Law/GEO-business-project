@@ -83,12 +83,37 @@ def ensure_process(state: dict) -> dict:
 
 
 def mode_of(pm_level: int, geo_level: int, tool_level: int) -> str:
+    """保留旧接口：返回整体 mode。P2-1 起推荐用 axis_depth 决定按维度讲解深度。"""
     levels = (pm_level, geo_level, tool_level)
     if any(x == 0 for x in levels):
         return "novice"
     if all(x == 2 for x in levels):
         return "expert"
     return "standard"
+
+
+def axis_depth(pm_level: int, geo_level: int, tool_level: int) -> dict:
+    """P2-1: 按 PM/GEO/Tool 三轴分别返回讲解深度（每轴 0=白话+示例 / 1=检查清单 / 2=差异提示）。
+
+    返回 dict:
+      pm: 0/1/2
+      geo: 0/1/2
+      tool: 0/1/2
+      pm_explain / geo_explain / tool_explain: bool（本轴是否给白话+示例）
+      overall_mode: novice / standard / expert（向后兼容）
+    """
+    def explain(level: int) -> bool:
+        return level == 0
+
+    return {
+        "pm": int(pm_level),
+        "geo": int(geo_level),
+        "tool": int(tool_level),
+        "pm_explain": explain(pm_level),
+        "geo_explain": explain(geo_level),
+        "tool_explain": explain(tool_level),
+        "overall_mode": mode_of(pm_level, geo_level, tool_level),
+    }
 
 
 def _norm_level(val: object) -> int:
@@ -176,6 +201,7 @@ def set_profile(state: dict, member: str, payload: dict) -> dict:
 
 
 def note_review_outcome(state: dict, member: str, result: str, first_attempt: bool) -> None:
+    """P2-3: 记录表现但**不**自动升级 pm/geo/tool 等级；只能由人显式 promote_profile 升。"""
     rec = get_profile(state, member)
     if rec is None:
         return
@@ -185,14 +211,26 @@ def note_review_outcome(state: dict, member: str, result: str, first_attempt: bo
     elif result in {"PASS", "OVERRIDE_SOFT"} and first_attempt:
         rec["stage_novice"] = False
         rec["first_pass_streak"] = int(rec.get("first_pass_streak") or 0) + 1
-        if rec["first_pass_streak"] >= 2:
-            for key in ("pm_level", "geo_level", "tool_level"):
-                if int(rec[key]) < 2:
-                    rec[key] = int(rec[key]) + 1
-                    break
-            rec["mode"] = mode_of(rec["pm_level"], rec["geo_level"], rec["tool_level"])
-            rec["first_pass_streak"] = 0
+    # 仅记录观察到的 streak，不自动提升
+    rec.setdefault("observed_streaks", {})
     rec["updated_at"] = engine.now()
+
+
+def promote_profile(state: dict, member: str, axis: str, level: int) -> dict:
+    """P2-3: 人显式确认升级某一轴的能力（axis ∈ {pm, geo, tool}）。"""
+    member = (member or "").strip()
+    if not member:
+        engine._fail("member required")
+    if axis not in {"pm_level", "geo_level", "tool_level"}:
+        engine._fail(f"bad axis {axis}; expected one of pm_level/geo_level/tool_level")
+    rec = state["profiles"].get(member) or blank_profile(member)
+    n = _norm_level(level)
+    rec[axis] = n
+    rec["mode"] = mode_of(rec["pm_level"], rec["geo_level"], rec["tool_level"])
+    rec["updated_at"] = engine.now()
+    rec["promoted_axes"] = list(rec.get("promoted_axes") or []) + [{"axis": axis, "to": n, "at": engine.now()}]
+    state["profiles"][member] = rec
+    return rec
 
 
 def process_guide(state: dict, member: str = "") -> dict:
@@ -203,11 +241,18 @@ def process_guide(state: dict, member: str = "") -> dict:
     flags = depth_flags(mode)
     stage = state.get("stage") or "01"
     slots = list(SLOTS_ALL if flags["concepts"] else SLOTS_EXPERT)
+    # P2-1: 三轴讲解深度
+    axis = axis_depth(
+        int((profile or {}).get("pm_level") or 0),
+        int((profile or {}).get("geo_level") or 0),
+        int((profile or {}).get("tool_level") or 0),
+    )
     return {
         "activity": state.get("activity") or "onboarding",
         "member": member,
         "mode": mode,
         "depth": flags,
+        "axis_depth": axis,
         "teach_focus": FOCUS.get(stage, ""),
         "flow": load_config()["flow"],
         "slots": slots,

@@ -17,6 +17,38 @@ def _root() -> Path:
     return Path(tempfile.mkdtemp(prefix="geo-case-"))
 
 
+# P1-2: 关键门双签 helper；测试场景中 G1/G3/G4/G8 必须两次不同 member
+_DUAL_SIGNERS = {
+    "G1": [("owner_a", "负责人"), ("owner_b", "GEO/验收专业复核")],
+    "G3": [("owner_a", "负责人"), ("owner_b", "测量复核")],
+    "G4": [("owner_a", "负责人/客户成功"), ("owner_b", "测量复核")],
+    "G8": [("owner_a", "负责人"), ("owner_b", "文件/资产复核")],
+}
+
+
+def _dual_decide(st: dict, gate: str, root: Path, **kw) -> None:
+    signers = _DUAL_SIGNERS.get(gate, [("owner_a", "负责人")])
+    for member, role in signers:
+        engine.decide(st, gate, "APPROVE", actor="human", cases_root=root, member=member, role=role, **kw)
+
+
+def _change_decide(st: dict, gate: str, root: Path, rewind_to: str, **kw) -> None:
+    """P1-3: CHANGE 必带 change_payload；测试用最小 payload。"""
+    payload = {
+        "reason": "test change",
+        "affected_fields": [],
+        "affected_docs": [],
+        "evidence_affected": [],
+        "re_freeze_needed": False,
+        "re_budget_needed": False,
+        "re_comms_needed": False,
+        "invalidated": [],
+        "new_versions": {},
+    }
+    payload.update(kw.pop("change_payload", {}))
+    engine.decide(st, gate, "CHANGE", actor="human", cases_root=root, rewind_to=rewind_to, member="owner_a", role="负责人", change_payload=payload)
+
+
 def _apply_cli(root: Path, case: str, payload: dict) -> int:
     jf = root / "p.json"
     jf.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -24,31 +56,37 @@ def _apply_cli(root: Path, case: str, payload: dict) -> int:
 
 
 STAGE_OUT = {
-    "01": "01_商机卡.md",
-    "02": "02_章程.md",
-    "07": "07_预算.md",
-    "08": "08_沟通矩阵.md",
-    "04": "04_进度.md",
-    "05": "05_周报.md",
-    "06": "06_验收单.md",
+    "01": ("01_商机卡.md",),
+    "02": ("02_章程.md", "02_验收标准.md", "02_需求规格.md"),
+    "07": ("07_预算.md",),
+    "08": ("08_沟通矩阵.md", "08_干系人.md"),
+    "03": ("03_冻结包.md", "03_环境登记.md", "03_出数报告.md"),
+    "04": ("04_进度.md",),
+    "05": ("05_周报.md", "05_干预轮次卡.md"),
+    "06": ("06_客户报告.md", "06_验收单.md"),
 }
 
 
 def _seed_stage_out(root: Path | None, st: dict) -> None:
     if root is None:
         return
-    name = STAGE_OUT.get(st["stage"])
-    if not name:
+    names = STAGE_OUT.get(st["stage"])
+    if not names:
         return
-    p = Path(root) / st["case_id"] / "out" / name
-    p.parent.mkdir(parents=True, exist_ok=True)
-    if not p.exists():
-        p.write_text(f"# {name}\ncase={st['case_id']}\nstage={st['stage']}\n", encoding="utf-8")
+    for name in names:
+        p = Path(root) / st["case_id"] / "out" / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            p.write_text(f"# {name}\ncase={st['case_id']}\nstage={st['stage']}\n", encoding="utf-8")
 
 
 def _approve(st: dict, gate: str, root: Path | None = None) -> None:
     _seed_stage_out(root, st)
-    engine.decide(st, gate, "APPROVE", actor="human", cases_root=root)
+    if gate in _DUAL_SIGNERS:
+        for member, role in _DUAL_SIGNERS[gate]:
+            engine.decide(st, gate, "APPROVE", actor="human", cases_root=root, member=member, role=role)
+    else:
+        engine.decide(st, gate, "APPROVE", actor="human", cases_root=root)
 
 
 def _lock_01_02(st: dict, sop: str = "诊断", root: Path | None = None) -> None:
@@ -529,7 +567,7 @@ def test_change_rewinds_and_allows_rewrite() -> None:
         st,
         {"fields": {"budget_hours": "12", "budget_scope": "冻结+噪声+基线+抽检", "quote_excludes_l1": "是"}},
     )
-    engine.decide(st, "G6", "CHANGE", actor="human", rewind_to="02", cases_root=root)
+    _change_decide(st, "G6", root, "02")
     assert st["stage"] == "02"
     assert st["waiting"] == "agent"
     assert "owner" not in st["fields"]
@@ -602,7 +640,7 @@ def _to_sprint_g5(root: Path, case: str) -> dict:
     _lock_01_02(st, "冲刺")
     _lock_07_08(st, "冲刺")
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     return st
@@ -791,10 +829,10 @@ def test_change_then_fresh_output_can_l1() -> None:
             }
         },
     )
-    engine.decide(st, "G1", "APPROVE", actor="human")
+    _dual_decide(st, "G1", None)
     _lock_07_08(st, "冲刺")
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     out = _write_signed_evidence(root, st)
@@ -804,7 +842,7 @@ def test_change_then_fresh_output_can_l1() -> None:
         cases_root=root,
     )
     assert st["waiting"] == "human"
-    engine.decide(st, "G5", "CHANGE", actor="human", rewind_to="05", cases_root=root)
+    _change_decide(st, "G5", root, "05")
     assert (out / "INVALIDATED.txt").is_file()
     try:
         engine.apply_fields(
@@ -864,10 +902,10 @@ def test_change_then_partial_output_cannot_lift() -> None:
             }
         },
     )
-    engine.decide(st, "G1", "APPROVE", actor="human")
+    _dual_decide(st, "G1", None)
     _lock_07_08(st, "冲刺")
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     out = _write_signed_evidence(root, st)
@@ -879,7 +917,7 @@ def test_change_then_partial_output_cannot_lift() -> None:
         cases_root=root,
     )
     assert st["waiting"] == "human"
-    engine.decide(st, "G5", "CHANGE", actor="human", rewind_to="05", cases_root=root)
+    _change_decide(st, "G5", root, "05")
     assert (out / "INVALIDATED.txt").is_file()
     assert not (out / "did.csv").exists()
     assert not (out / "coverage.csv").exists()
@@ -1014,7 +1052,7 @@ def test_l1_without_did_csv_fails() -> None:
     _lock_01_02(st, "冲刺")
     _lock_07_08(st, "冲刺")
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline", "intervention", "retest"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     try:
@@ -1086,7 +1124,7 @@ def test_plan_hours_cannot_exceed_budget() -> None:
     _lock_01_02(st, "诊断")
     _lock_07_08(st, "诊断")
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _dual_decide(st, "G3", root)
     try:
         engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "99"}})
     except ValueError as e:
@@ -1171,7 +1209,7 @@ def test_unaccepted_delivery_cannot_close() -> None:
     _lock_01_02(st, "诊断")
     _lock_07_08(st, "诊断")
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
@@ -1200,7 +1238,7 @@ def test_delivery_checksum_must_match_case_files() -> None:
     _lock_01_02(st, "诊断")
     _lock_07_08(st, "诊断")
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
     engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
     engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
@@ -1297,7 +1335,7 @@ def _diag_to_g5(root: Path, case: str, *, seed_formal: bool = True) -> dict:
     if seed_formal:
         _approve(st, "G3", root)
     else:
-        engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+        _dual_decide(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
     if seed_formal:
         _approve(st, "G2", root)
@@ -1381,7 +1419,7 @@ def test_g8_rejects_empty_formal() -> None:
     root = _root()
     st = _diag_to_g5(root, "ef1", seed_formal=False)
     engine.apply_fields(st, {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}}, cases_root=root)
-    engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
+    _dual_decide(st, "G4", root)
     _seed_closeout(root, st)
     _seed_deposit(root, st)
     try:
