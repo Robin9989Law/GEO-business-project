@@ -8,6 +8,10 @@ __pycache__/
 .env.*
 研究/业务流程文献/_secrets/
 
+# 研究全文与博客原文只留本机，不入库
+研究/业务流程文献/**/全文/pdfs/
+研究/业务流程文献/**/全文/txt/
+
 # 开单实例，不是模板
 agent_pm/cases/*/
 !agent_pm/cases/.gitkeep

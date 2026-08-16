@@ -14,6 +14,8 @@
 
 现行登记：`登记schema.md` + 各站 `*.统一.json`。硬门禁资格：`硬门禁资格表.csv`。整改说明：`审计整改_2026-08-16.md`。
 
+论文 PDF、抽取 TXT 和博客原文在各站 `全文/`，只留本机，不进 git。采集脚本会按登记重新落盘。
+
 ```bash
 export OPENALEX_API_KEY=...
 export TAVILY_API_KEY=...
