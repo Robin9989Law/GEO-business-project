@@ -623,12 +623,14 @@ def submit_review(
         "at": engine.now(),
     }
     dest = review_dir(state["case_id"], stage, cases_root, files_root)
-    (dest / f"{rid}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    qr_path = dest / f"{rid}.json"
+    qr_path.write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (dest / f"{rid}.md").write_text(format_review_md(rec), encoding="utf-8")
     state["review"]["current_id"] = rid
     state["review"]["current_result"] = result
     state["review"]["current_stage"] = stage
     state["review"]["current_checksum"] = digest
+    state["review"]["current_record_checksum"] = _sha(qr_path.read_bytes())
     if result == "PASS":
         state["activity"] = "agent_draft"
         state["waiting"] = "agent"
@@ -692,7 +694,9 @@ def appeal(
     _require_activity(state, APPEAL_OK, "appeal")
     if not (reason or "").strip():
         engine._fail("appeal needs reason")
-    rec = _read_review(state, review_id, cases_root, files_root)
+    rec = validate_current_review_target(state, cases_root, files_root)
+    if rec is None:
+        engine._fail("review target stale")
     _lock_current(state, rec, review_id, expected_current_id, expected_checksum)
     if rec.get("hard_fails"):
         engine._fail("hard rules cannot be appealed")
@@ -730,9 +734,10 @@ def resolve_review(
         engine._fail("verdict must be UPHOLD or OVERRIDE_SOFT")
     if not (reason or "").strip():
         engine._fail("resolve-review needs reason")
-    rec = _read_review(state, review_id, cases_root, files_root)
+    rec = validate_current_review_target(state, cases_root, files_root)
+    if rec is None:
+        engine._fail("review target stale")
     _lock_current(state, rec, review_id, expected_current_id, expected_checksum)
-    validate_current_review_target(state, cases_root, files_root)
     if rec.get("hard_fails") and verdict == "OVERRIDE_SOFT":
         engine._fail("hard rules cannot be overridden")
     resolution = {"verdict": verdict, "actor": actor, "reason": reason.strip(), "at": engine.now()}
@@ -779,6 +784,7 @@ def _void_current_review(state: dict, why: str) -> None:
     rid = (state.get("review") or {}).get("current_id") or ""
     state["review"]["current_result"] = ""
     state["review"]["current_checksum"] = ""
+    state["review"]["current_record_checksum"] = ""
     state["activity"] = "rework_required"
     state["waiting"] = "agent"
     state["log"].append({"at": engine.now(), "op": "review_void", "id": rid, "why": why})
@@ -827,41 +833,70 @@ def _draft_target_ok(state: dict, rec: dict, cases_root: Path | None) -> bool:
     return live == stored == state_ck
 
 
-def validate_current_review_target(
-    state: dict,
-    cases_root: Path | None = None,
-    files_root: Path | None = None,
-) -> None:
-    """apply / APPROVE / resolve-review 前重读 QR 与材料。不一致则作废并要求重审。"""
-    teaching.ensure_process(state)
-    if not review_engaged(state):
-        return
+def _find_qr_path(state: dict, review_id: str, cases_root: Path | None, files_root: Path | None) -> Path | None:
+    stage = state.get("stage") or "01"
+    p = review_dir(state["case_id"], stage, cases_root, files_root) / f"{review_id}.json"
+    if p.is_file():
+        return p
+    vault = files.vault_path(state["case_id"], cases_root, files_root)
+    for found in vault.glob(f"原始/*/评审/{review_id}.json"):
+        if found.is_file():
+            return found
+    return None
+
+
+def _validate_current_review_record(
+    state: dict, cases_root: Path | None, files_root: Path | None
+) -> dict:
     rev = state["review"]
     rid = str(rev.get("current_id") or "").strip()
-    if not rid:
-        return
-    need_live = rev.get("current_result") in SOFT_OK or state.get("activity") == "appeal_pending"
-    if not need_live:
-        return
-    try:
-        rec = _read_review(state, rid, cases_root, files_root)
-    except Exception:
+    stored = str(rev.get("current_record_checksum") or "").strip()
+    if not rid or not stored:
+        _stale(state, "review record checksum missing")
+    path = _find_qr_path(state, rid, cases_root, files_root)
+    if path is None:
         _stale(state, "review record missing")
+    live = _sha(path.read_bytes())
+    if live != stored:
+        _stale(state, "review record checksum mismatch")
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        _stale(state, "review record corrupt")
     if rec.get("case_id") != state.get("case_id"):
         _stale(state, "review case mismatch")
     if rec.get("stage") != state.get("stage"):
         _stale(state, "review stage mismatch")
     if rec.get("review_id") != rid:
         _stale(state, "review id mismatch")
+    return rec
+
+
+def validate_current_review_target(
+    state: dict,
+    cases_root: Path | None = None,
+    files_root: Path | None = None,
+) -> dict | None:
+    """apply / APPROVE / appeal / resolve-review 前重读 QR 与材料。不一致则作废并要求重审。"""
+    teaching.ensure_process(state)
+    if not review_engaged(state):
+        return None
+    rev = state["review"]
+    rid = str(rev.get("current_id") or "").strip()
+    if not rid:
+        return None
+    rec = _validate_current_review_record(state, cases_root, files_root)
     if rec.get("raw_id"):
         if not _raw_target_ok(state, rec, cases_root, files_root):
             _stale(state, "review raw target mismatch")
-        return
+        return rec
     if rec.get("draft_id") or rec.get("draft_path"):
         if not _draft_target_ok(state, rec, cases_root):
             _stale(state, "review draft target mismatch")
-        return
-    _stale(state, "review target missing")
+        return rec
+    if rev.get("current_result") in SOFT_OK or state.get("activity") == "appeal_pending":
+        _stale(state, "review target missing")
+    return rec
 
 
 def reset_stage_review(state: dict) -> None:
@@ -869,6 +904,7 @@ def reset_stage_review(state: dict) -> None:
     state["review"]["current_id"] = ""
     state["review"]["current_result"] = ""
     state["review"]["current_checksum"] = ""
+    state["review"]["current_record_checksum"] = ""
     state["review"]["current_stage"] = state.get("stage") or ""
     if state.get("profiles"):
         state["activity"] = "material_pending"

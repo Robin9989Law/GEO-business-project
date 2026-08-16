@@ -131,6 +131,7 @@ def new_state(case_id: str) -> dict:
             "current_result": "",
             "current_stage": "",
             "current_checksum": "",
+            "current_record_checksum": "",
             "seq": 0,
             "attempts": {},
             "failures": {},

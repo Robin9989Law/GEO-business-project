@@ -64,6 +64,7 @@ def ensure_process(state: dict) -> dict:
             "current_result": "",
             "current_stage": "",
             "current_checksum": "",
+            "current_record_checksum": "",
             "seq": 0,
             "attempts": {},
             "failures": {},
@@ -74,6 +75,7 @@ def ensure_process(state: dict) -> dict:
     rev.setdefault("current_result", "")
     rev.setdefault("current_stage", "")
     rev.setdefault("current_checksum", "")
+    rev.setdefault("current_record_checksum", "")
     rev.setdefault("seq", 0)
     rev.setdefault("attempts", {})
     rev.setdefault("failures", {})

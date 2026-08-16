@@ -868,6 +868,98 @@ def test_draft_path_no_fallback() -> None:
         raise AssertionError("missing draft_path must not fall back to draft_id")
 
 
+def test_cli_qr_tamper_cannot_soften_hard_fail() -> None:
+    import run
+
+    root = _root()
+    case = "qr-hard"
+    assert run.main(["init", case, "--cases-root", str(root)]) == 0
+    pf = root / "p.json"
+    pf.write_text(json.dumps({"pm_level": 1, "geo_level": 1, "tool_level": 1}), encoding="utf-8")
+    assert run.main(["profile", case, "--member", "负责人", "--json", str(pf), "--cases-root", str(root)]) == 0
+    src = _write(root / "ban.md", "保证推荐\n")
+    raw = files.deposit_raw(case, src, "01", cases_root=root)
+    rf = root / "r.json"
+    rf.write_text(json.dumps({"quality": _quality(2), "confidence": 0.99, "raw_id": raw["raw_id"]}), encoding="utf-8")
+    assert run.main(["review", case, "--member", "负责人", "--raw-id", raw["raw_id"], "--json", str(rf), "--cases-root", str(root)]) == 0
+    st = engine.load_state(case, root)
+    assert st["review"]["current_result"] == "REWORK"
+    qr = review.review_dir(case, "01", root) / f"{st['review']['current_id']}.json"
+    rec = json.loads(qr.read_text(encoding="utf-8"))
+    assert rec.get("hard_fails")
+    rec["hard_fails"] = []
+    qr.write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    assert run.main(["appeal", case, "--review-id", st["review"]["current_id"], "--reason", "想覆盖硬规则", "--cases-root", str(root)]) == 2
+    st2 = engine.load_state(case, root)
+    assert st2["review"]["current_result"] == ""
+    assert st2["activity"] == "rework_required"
+    assert run.main(["appeal", case, "--review-id", st["review"]["current_id"], "--reason", "再试一次", "--cases-root", str(root)]) == 2
+
+
+def test_cli_missing_qr_voids_before_resolve() -> None:
+    import run
+
+    root = _root()
+    case = "qr-miss"
+    assert run.main(["init", case, "--cases-root", str(root)]) == 0
+    pf = root / "p.json"
+    pf.write_text(json.dumps({"pm_level": 1, "geo_level": 1, "tool_level": 1}), encoding="utf-8")
+    assert run.main(["profile", case, "--member", "负责人", "--json", str(pf), "--cases-root", str(root)]) == 0
+    st0 = engine.load_state(case, root)
+    raw = _deposit(st0, root)
+    rf = root / "r.json"
+    rf.write_text(json.dumps({"quality": _quality(2), "confidence": 0.5, "raw_id": raw["raw_id"]}), encoding="utf-8")
+    assert run.main(["review", case, "--member", "负责人", "--raw-id", raw["raw_id"], "--json", str(rf), "--cases-root", str(root)]) == 0
+    st = engine.load_state(case, root)
+    assert st["review"]["current_result"] == "HUMAN_REVIEW_REQUIRED"
+    assert st["activity"] == "appeal_pending"
+    qr = review.review_dir(case, "01", root) / f"{st['review']['current_id']}.json"
+    backup = qr.read_text(encoding="utf-8")
+    qr.unlink()
+    assert (
+        run.main(
+            [
+                "resolve-review",
+                case,
+                "--review-id",
+                st["review"]["current_id"],
+                "--verdict",
+                "OVERRIDE_SOFT",
+                "--reason",
+                "先过",
+                "--actor",
+                "human",
+                "--cases-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
+    st2 = engine.load_state(case, root)
+    assert st2["review"]["current_result"] == ""
+    assert st2["activity"] == "rework_required"
+    qr.write_text(backup, encoding="utf-8")
+    assert (
+        run.main(
+            [
+                "resolve-review",
+                case,
+                "--review-id",
+                st["review"]["current_id"],
+                "--verdict",
+                "OVERRIDE_SOFT",
+                "--reason",
+                "恢复后再过",
+                "--actor",
+                "human",
+                "--cases-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
+
+
 def test_cli_profile_review() -> None:
     import run
 
@@ -909,5 +1001,7 @@ if __name__ == "__main__":
     test_cli_void_review_persists_and_requires_rereview()
     test_raw_registry_tamper_blocks_apply()
     test_draft_path_no_fallback()
+    test_cli_qr_tamper_cannot_soften_hard_fail()
+    test_cli_missing_qr_voids_before_resolve()
     test_cli_profile_review()
     print("ok")
