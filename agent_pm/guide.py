@@ -151,7 +151,7 @@ PLAYBOOK = {
             "出现禁售句则拒收",
         ],
         "materials": [
-            {"item": "出数报告", "put_at": "流程/03 测量/案件/{case}/出数/metrics_daily.csv", "why": "唯一可见性交付"},
+            {"item": "出数报告", "put_at": "流程/03 测量/案件/{case}/出数/metrics_daily.csv", "why": "须与 coverage.csv、evidence_manifest.json、客户可见 MD/PDF 报告同目录；身份列绑本案冻结"},
             {"item": "验收决定", "put_at": "agent_pm/cases/{case}/out/06_验收单.md", "why": "G4"},
         ],
         "then": "G4 APPROVE 后进 09 收尾，案件还没结束",

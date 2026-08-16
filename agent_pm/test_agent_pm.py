@@ -23,7 +23,35 @@ def _apply_cli(root: Path, case: str, payload: dict) -> int:
     return run.main(["apply", case, "--json", str(jf), "--cases-root", str(root)])
 
 
-def _lock_01_02(st: dict, sop: str = "诊断") -> None:
+STAGE_OUT = {
+    "01": "01_商机卡.md",
+    "02": "02_章程.md",
+    "07": "07_预算.md",
+    "08": "08_沟通矩阵.md",
+    "04": "04_进度.md",
+    "05": "05_周报.md",
+    "06": "06_验收单.md",
+}
+
+
+def _seed_stage_out(root: Path | None, st: dict) -> None:
+    if root is None:
+        return
+    name = STAGE_OUT.get(st["stage"])
+    if not name:
+        return
+    p = Path(root) / st["case_id"] / "out" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        p.write_text(f"# {name}\ncase={st['case_id']}\nstage={st['stage']}\n", encoding="utf-8")
+
+
+def _approve(st: dict, gate: str, root: Path | None = None) -> None:
+    _seed_stage_out(root, st)
+    engine.decide(st, gate, "APPROVE", actor="human", cases_root=root)
+
+
+def _lock_01_02(st: dict, sop: str = "诊断", root: Path | None = None) -> None:
     engine.apply_fields(
         st,
         {
@@ -36,7 +64,7 @@ def _lock_01_02(st: dict, sop: str = "诊断") -> None:
             }
         },
     )
-    engine.decide(st, "G0", "APPROVE", actor="human")
+    _approve(st, "G0", root)
     engine.apply_fields(
         st,
         {
@@ -57,7 +85,7 @@ def _lock_01_02(st: dict, sop: str = "诊断") -> None:
             }
         },
     )
-    engine.decide(st, "G1", "APPROVE", actor="human")
+    _approve(st, "G1", root)
 
 
 def _install_freeze(root: Path, st: dict, freeze_id: str = "fz-test") -> str:
@@ -112,14 +140,103 @@ def _apply03(st: dict, root: Path, extra: dict | None = None) -> None:
     _seed_delivery(root, st)
 
 
+def _identity(st: dict) -> dict:
+    return {
+        "case_id": st["case_id"],
+        "project_id": st["fields"].get("project_id") or "",
+        "freeze_id": st["fields"].get("freeze_id") or "",
+        "config_checksum": st["fields"].get("config_checksum") or "",
+    }
+
+
+def _write_csv(path: Path, rows: list[dict]) -> None:
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fields = list(rows[0].keys())
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        for row in rows:
+            w.writerow(row)
+
+
 def _seed_delivery(root: Path, st: dict) -> str:
+    import hashlib
+    import json
+
     out = Path(root) / st["case_id"] / "measure" / "出数"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "metrics_daily.csv").write_text("metric,value\nmention,0\n", encoding="utf-8")
+    ident = _identity(st)
+    daily = {
+        "date": "2026-08-01",
+        "platform": "doubao",
+        "channel": "app_doubao",
+        "query_set": "core",
+        "p_mention": "0",
+        **ident,
+    }
+    _write_csv(out / "metrics_daily.csv", [daily])
+    cov = {
+        "channel": "app_doubao",
+        "tier": "P0",
+        "n_expected": "1",
+        "n_present": "1",
+        "missing": "",
+        "complete": "1",
+        "evidence_run_id": "1",
+        **ident,
+    }
+    _write_csv(out / "coverage.csv", [cov])
+    (out / "可见性报告.md").write_text(
+        f"# 可见性报告\nproject_id={ident['project_id']}\nfreeze_id={ident['freeze_id']}\n四选一：描述基线\n",
+        encoding="utf-8",
+    )
+    files = {
+        "metrics_daily.csv": hashlib.sha256((out / "metrics_daily.csv").read_bytes()).hexdigest()[:16],
+        "coverage.csv": hashlib.sha256((out / "coverage.csv").read_bytes()).hexdigest()[:16],
+    }
+    (out / "evidence_manifest.json").write_text(
+        json.dumps({**ident, "evidence_run_id": "1", "files": files}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return engine.delivery_files_checksum(out)
 
 
-def _lock_07_08(st: dict, sop: str = "诊断") -> None:
+def _seed_closeout(root: Path, st: dict) -> None:
+    out = Path(root) / st["case_id"] / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    v = st["fields"].get("verdict_4") or "描述基线"
+    (out / "09_结项报告.md").write_text(
+        f"# 结项报告\n实际交付：{v}\nclose_no_reopen_l1：是\n",
+        encoding="utf-8",
+    )
+    (out / "09_经验教训.md").write_text("# 经验教训\n问法形态：无品牌发现问\n", encoding="utf-8")
+    (out / "09_资产移交.md").write_text(
+        "# 资产移交\nclose_assets_ok：是\nclose_archive_ok：是\nasset_deposit.py 已跑：是\n",
+        encoding="utf-8",
+    )
+
+
+def _seed_deposit(root: Path, st: dict) -> None:
+    import hashlib
+
+    pid = st["fields"].get("project_id") or ""
+    anon = hashlib.sha256(f"geo-asset|{pid}".encode()).hexdigest()[:12]
+    d = Path(root) / st["case_id"] / "measure" / "资产库" / "登记"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "deposits.csv").write_text(
+        "date,project_anon,needs,panel_slices,domains,calib_rows,status\n"
+        f"2026-08-16,{anon},1,0,0,0,needs_only\n",
+        encoding="utf-8",
+    )
+    if st["fields"].get("sop_stage") == "冲刺":
+        plays = Path(root) / st["case_id"] / "measure" / "资产库" / "干预复盘"
+        plays.mkdir(parents=True, exist_ok=True)
+        (plays / "plays.csv").write_text("date,play_type\n2026-08-01,FAQ\n", encoding="utf-8")
+
+
+def _lock_07_08(st: dict, sop: str = "诊断", root: Path | None = None) -> None:
     scope = {"诊断": "冻结+噪声+基线+抽检", "冲刺": "冻结+噪声+基线+一类证据+复测", "续约": "weekly+calib"}[sop]
     engine.apply_fields(
         st,
@@ -131,7 +248,7 @@ def _lock_07_08(st: dict, sop: str = "诊断") -> None:
             }
         },
     )
-    engine.decide(st, "G6", "APPROVE", actor="human")
+    _approve(st, "G6", root)
     engine.apply_fields(
         st,
         {
@@ -143,7 +260,7 @@ def _lock_07_08(st: dict, sop: str = "诊断") -> None:
             }
         },
     )
-    engine.decide(st, "G7", "APPROVE", actor="human")
+    _approve(st, "G7", root)
 
 
 def test_walk_order_is_full_process() -> None:
@@ -278,23 +395,23 @@ def test_diagnosis_blocks_intervention_and_verdict() -> None:
     root = _root()
     engine.init_case("c3", root)
     st = engine.load_state("c3", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     assert engine.next_action(st)["stage"] == "03"
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G3", root)
     try:
         engine.apply_fields(st, {"windows": ["intervention", "noise"]})
     except ValueError as e:
         assert "windows" in str(e)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     try:
         engine.apply_fields(st, {"fields": {"intervention_class": "FAQ"}})
     except ValueError as e:
         assert "intervention" in str(e)
     engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
-    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G5", root)
     try:
         engine.apply_fields(st, {"fields": {"verdict_4": "受控前后描述"}})
     except ValueError as e:
@@ -311,13 +428,15 @@ def test_diagnosis_blocks_intervention_and_verdict() -> None:
     )
     nxt = engine.next_action(st)
     assert nxt["waiting"] == "human" and nxt["gate"] == "G4"
-    engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G4", root)
     nxt = engine.next_action(st)
     assert nxt["stage"] == "09" and nxt["waiting"] == "agent"
     try:
         engine.apply_fields(st, {"fields": {"close_assets_ok": "否", "close_no_reopen_l1": "是"}})
     except ValueError as e:
         assert "assets" in str(e)
+    _seed_closeout(root, st)
+    _seed_deposit(root, st)
     engine.apply_fields(
         st,
         {
@@ -329,7 +448,7 @@ def test_diagnosis_blocks_intervention_and_verdict() -> None:
         },
         cases_root=root,
     )
-    engine.decide(st, "G8", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G8", root)
     assert engine.next_action(st)["waiting"] == "done"
 
 
@@ -1104,16 +1223,16 @@ def test_pending_board_blocks_close() -> None:
     root = _root()
     engine.init_case("bd1", root)
     st = engine.load_state("bd1", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
-    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G5", root)
     engine.apply_fields(st, {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}}, cases_root=root)
-    engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G4", root)
     note = root / "note.md"
     note.write_text("xfer", encoding="utf-8")
     _files.drop_exchange("bd1", note, "操作员", "评分", cases_root=root)
@@ -1133,20 +1252,20 @@ def test_close_cannot_reopen_l1() -> None:
     root = _root()
     engine.init_case("cl1", root)
     st = engine.load_state("cl1", root)
-    _lock_01_02(st, "诊断")
-    _lock_07_08(st, "诊断")
+    _lock_01_02(st, "诊断", root)
+    _lock_07_08(st, "诊断", root)
     _apply03(st, root)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G3", root)
     engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G2", root)
     engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
-    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G5", root)
     engine.apply_fields(
         st,
         {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}},
         cases_root=root,
     )
-    engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
+    _approve(st, "G4", root)
     try:
         engine.apply_fields(
             st,
@@ -1163,6 +1282,154 @@ def test_close_cannot_reopen_l1() -> None:
         assert "L1" in str(e) or "verdict" in str(e)
     else:
         raise AssertionError("close must not reopen L1")
+
+
+def _diag_to_g5(root: Path, case: str, *, seed_formal: bool = True) -> dict:
+    engine.init_case(case, root)
+    st = engine.load_state(case, root)
+    if seed_formal:
+        _lock_01_02(st, "诊断", root)
+        _lock_07_08(st, "诊断", root)
+    else:
+        _lock_01_02(st, "诊断")
+        _lock_07_08(st, "诊断")
+    _apply03(st, root)
+    if seed_formal:
+        _approve(st, "G3", root)
+    else:
+        engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"windows": ["noise", "baseline"], "fields": {"plan_hours": "10"}})
+    if seed_formal:
+        _approve(st, "G2", root)
+    else:
+        engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    engine.apply_fields(st, {"fields": {"intervention_class": "无"}})
+    if seed_formal:
+        _approve(st, "G5", root)
+    else:
+        engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    return st
+
+
+def test_g4_requires_customer_report() -> None:
+    root = _root()
+    st = _diag_to_g5(root, "rp1")
+    out = Path(root) / st["case_id"] / "measure" / "出数"
+    for p in out.glob("*.md"):
+        p.unlink()
+    for p in out.glob("*.pdf"):
+        p.unlink()
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "report" in str(e)
+    else:
+        raise AssertionError("G4 must reject delivery without customer report")
+
+
+def test_g4_rejects_metrics_only() -> None:
+    root = _root()
+    st = _diag_to_g5(root, "mo1")
+    out = Path(root) / st["case_id"] / "measure" / "出数"
+    for p in out.iterdir():
+        if p.is_file() and p.name != "metrics_daily.csv":
+            p.unlink()
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        msg = str(e)
+        assert "delivery" in msg or "出数" in msg or "report" in msg
+    else:
+        raise AssertionError("G4 must reject metrics_daily.csv alone")
+
+
+def test_g4_rejects_foreign_identity() -> None:
+    root = _root()
+    st = _diag_to_g5(root, "fi1")
+    out = Path(root) / st["case_id"] / "measure" / "出数"
+    foreign = dict(_identity(st), case_id="other", project_id="P-OTHER", freeze_id="fz-other")
+    daily = {
+        "date": "2026-08-01",
+        "platform": "doubao",
+        "channel": "app_doubao",
+        "query_set": "core",
+        "p_mention": "0",
+        **foreign,
+    }
+    _write_csv(out / "metrics_daily.csv", [daily])
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "identity" in str(e) or "freeze" in str(e)
+    else:
+        raise AssertionError("G4 must reject another case's metrics_daily.csv")
+
+
+def test_g8_rejects_empty_formal() -> None:
+    root = _root()
+    st = _diag_to_g5(root, "ef1", seed_formal=False)
+    engine.apply_fields(st, {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}}, cases_root=root)
+    engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
+    _seed_closeout(root, st)
+    _seed_deposit(root, st)
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"close_assets_ok": "是", "close_no_reopen_l1": "是", "verdict_4": "描述基线"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "formal" in str(e) or "manifest" in str(e)
+    else:
+        raise AssertionError("G8 must reject empty formal manifest")
+
+
+def test_g8_rejects_missing_closeout_drafts() -> None:
+    root = _root()
+    st = _diag_to_g5(root, "cd1")
+    engine.apply_fields(st, {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}}, cases_root=root)
+    _approve(st, "G4", root)
+    _seed_deposit(root, st)
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"close_assets_ok": "是", "close_no_reopen_l1": "是", "verdict_4": "描述基线"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "closeout" in str(e) or "draft" in str(e)
+    else:
+        raise AssertionError("G8 must reject missing 09 closeout drafts")
+
+
+def test_g8_rejects_missing_deposit() -> None:
+    root = _root()
+    st = _diag_to_g5(root, "dep1")
+    engine.apply_fields(st, {"fields": {"verdict_4": "描述基线", "delivery_accepted": "是"}}, cases_root=root)
+    _approve(st, "G4", root)
+    _seed_closeout(root, st)
+    try:
+        engine.apply_fields(
+            st,
+            {"fields": {"close_assets_ok": "是", "close_no_reopen_l1": "是", "verdict_4": "描述基线"}},
+            cases_root=root,
+        )
+    except ValueError as e:
+        assert "archive" in str(e) or "deposit" in str(e)
+    else:
+        raise AssertionError("G8 must reject close without asset deposit")
 
 
 if __name__ == "__main__":
@@ -1191,6 +1458,12 @@ if __name__ == "__main__":
     test_delivery_checksum_must_match_case_files()
     test_pending_board_blocks_close()
     test_close_cannot_reopen_l1()
+    test_g4_requires_customer_report()
+    test_g4_rejects_metrics_only()
+    test_g4_rejects_foreign_identity()
+    test_g8_rejects_empty_formal()
+    test_g8_rejects_missing_closeout_drafts()
+    test_g8_rejects_missing_deposit()
     test_contradictory_did_cannot_l1()
     test_l1_without_did_csv_fails()
     print("ok")

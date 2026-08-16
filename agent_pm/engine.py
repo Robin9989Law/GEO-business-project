@@ -57,9 +57,9 @@ VERDICT_OK = {
 }
 NARROW = {"诊断": frozenset(), "冲刺": frozenset({"诊断"}), "续约": frozenset({"诊断"})}
 STAGE_WINDOWS = {
-    "诊断": frozenset({"noise", "baseline"}),
-    "冲刺": frozenset({"noise", "baseline", "retest", "intervention"}),
-    "续约": frozenset({"weekly", "calib"}),
+    "诊断": frozenset({"day0", "noise", "baseline"}),
+    "冲刺": frozenset({"day0", "noise", "baseline", "intervention", "wait", "retest"}),
+    "续约": frozenset({"day0", "weekly", "calib"}),
 }
 BANNED_CLAIMS = (
     "保证推荐",
@@ -405,12 +405,25 @@ def _measure_out_dirs(case_id: str, cases_root: Path | None) -> list[Path]:
 
 
 SHARED_DELIVERY = ROOT / "流程" / "03 测量" / "出数"
-DELIVERY_HASH_FILES = (
+DELIVERY_REQUIRED_FILES = (
     "evidence_manifest.json",
     "metrics_daily.csv",
     "coverage.csv",
-    "did.csv",
 )
+DELIVERY_OPTIONAL_FILES = ("did.csv",)
+REPORT_SUFFIXES = {".md", ".pdf"}
+REPORT_SKIP_NAMES = frozenset({"README.md", "报告模板.md", "INVALIDATED.txt"})
+EXPECTED_FORMAL_DOCS = {
+    "01": ("01_商机卡",),
+    "02": ("02_章程",),
+    "07": ("07_预算",),
+    "08": ("08_沟通矩阵",),
+    "04": ("04_进度",),
+    "05": ("05_周报",),
+    "06": ("06_验收单",),
+}
+CLOSE_DRAFTS = ("09_结项报告.md", "09_经验教训.md", "09_资产移交.md")
+IDENTITY_KEYS = ("case_id", "project_id", "freeze_id", "config_checksum")
 
 
 def _is_shared_delivery(path: Path) -> bool:
@@ -421,47 +434,368 @@ def _is_shared_delivery(path: Path) -> bool:
         return False
 
 
+def delivery_report_files(out_dir: Path) -> list[Path]:
+    found: list[Path] = []
+    if not Path(out_dir).is_dir():
+        return found
+    skip = set(DELIVERY_REQUIRED_FILES) | set(DELIVERY_OPTIONAL_FILES) | set(REPORT_SKIP_NAMES)
+    for p in sorted(Path(out_dir).iterdir()):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        if p.name in skip:
+            continue
+        if p.suffix.lower() in REPORT_SUFFIXES:
+            found.append(p)
+    return found
+
+
 def resolve_delivery_dir(case_id: str, cases_root: Path | None = None) -> Path | None:
     for d in _measure_out_dirs(case_id, cases_root):
         if not d.is_dir():
             continue
         if _is_shared_delivery(d):
             continue
-        if any((d / name).is_file() for name in DELIVERY_HASH_FILES):
+        if all((d / name).is_file() for name in DELIVERY_REQUIRED_FILES):
             return d
     return None
 
 
-def delivery_files_checksum(out_dir: Path) -> str:
-    h = hashlib.sha256()
-    found = False
-    for name in DELIVERY_HASH_FILES:
+def _delivery_hash_paths(out_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    for name in DELIVERY_REQUIRED_FILES:
         p = Path(out_dir) / name
-        if not p.is_file():
-            continue
-        found = True
-        h.update(name.encode("utf-8"))
+        if p.is_file():
+            paths.append(p)
+    for name in DELIVERY_OPTIONAL_FILES:
+        p = Path(out_dir) / name
+        if p.is_file():
+            paths.append(p)
+    paths.extend(delivery_report_files(out_dir))
+    return paths
+
+
+def delivery_files_checksum(out_dir: Path) -> str:
+    if not all((Path(out_dir) / name).is_file() for name in DELIVERY_REQUIRED_FILES):
+        return ""
+    if not delivery_report_files(out_dir):
+        return ""
+    h = hashlib.sha256()
+    for p in _delivery_hash_paths(out_dir):
+        h.update(p.name.encode("utf-8"))
         h.update(p.read_bytes())
-    return h.hexdigest()[:16] if found else ""
+    return h.hexdigest()[:16]
 
 
-def formal_docs_checksum_errors(case_id: str, cases_root: Path | None = None) -> list[str]:
+def expected_formal_doc_ids() -> tuple[str, ...]:
+    ids: list[str] = []
+    for stage in STAGES:
+        if stage == "09":
+            break
+        ids.extend(EXPECTED_FORMAL_DOCS.get(stage, ()))
+    return tuple(ids)
+
+
+def _resolve_vault_file(vault: Path, rel_or_abs: str) -> Path:
+    p = Path(rel_or_abs)
+    if p.is_file():
+        return p
+    cand = vault / rel_or_abs
+    if cand.is_file():
+        return cand
+    try:
+        cand = ROOT / rel_or_abs
+        if cand.is_file():
+            return cand
+    except OSError:
+        pass
+    return p
+
+
+def formal_docs_checksum_errors(
+    case_id: str,
+    cases_root: Path | None = None,
+    state: dict | None = None,
+) -> list[str]:
     import files as _files
 
     vault = _files.vault_path(case_id, cases_root)
     current_dir = vault / "正式" / "现行"
-    errs = []
-    for doc in _files._docs(vault):
-        if doc.get("status") != "现行":
-            continue
+    docs = _files._docs(vault)
+    current = [d for d in docs if d.get("status") == "现行"]
+    if not current:
+        return ["empty_manifest"]
+    errs: list[str] = []
+    by_id = {d.get("doc_id") or "": d for d in current}
+    for doc_id in expected_formal_doc_ids():
+        if doc_id not in by_id:
+            errs.append(f"missing:{doc_id}")
+    gates = (state or {}).get("gates") or {}
+    registered_names: set[str] = set()
+    for doc in current:
         doc_id = doc.get("doc_id") or ""
         suffix = Path(doc.get("path") or ".md").suffix or ".md"
-        current = current_dir / f"{doc_id}{suffix}"
-        if not current.is_file():
+        current_p = current_dir / f"{doc_id}{suffix}"
+        if not current_p.is_file():
             hits = list(current_dir.glob(doc_id + ".*")) if doc_id else []
-            current = hits[0] if hits else current
-        if not current.is_file() or _files._sha256(current) != (doc.get("checksum") or ""):
+            current_p = hits[0] if hits else current_p
+        if current_p.is_file():
+            registered_names.add(current_p.name)
+        if not current_p.is_file() or _files._sha256(current_p) != (doc.get("checksum") or ""):
             errs.append(doc_id or "doc")
+        gate = (doc.get("gate") or "").strip()
+        if gate:
+            verdict = (gates.get(gate) or {}).get("verdict")
+            if verdict not in {"APPROVE", "N/A"}:
+                errs.append(f"gate:{doc_id}:{gate}")
+    if current_dir.is_dir():
+        for p in current_dir.iterdir():
+            if p.is_file() and not p.name.startswith(".") and p.name not in registered_names:
+                errs.append(f"unregistered:{p.name}")
+    for doc in docs:
+        if doc.get("status") not in {"历史", "现行"}:
+            continue
+        stored = _resolve_vault_file(vault, doc.get("path") or "")
+        if not stored.is_file() or _files._sha256(stored) != (doc.get("checksum") or ""):
+            errs.append(f"version:{doc.get('doc_id') or 'doc'}:r{doc.get('rev') or '?'}")
+    return errs
+
+
+def case_out_dir(case_id: str, cases_root: Path | None) -> Path:
+    return (cases_root or DEFAULT_CASES) / case_id / "out"
+
+
+def closeout_draft_paths(case_id: str, cases_root: Path | None) -> list[Path]:
+    base = case_out_dir(case_id, cases_root)
+    found: list[Path] = []
+    for name in CLOSE_DRAFTS:
+        for cand in (base / name, base / "09" / name):
+            if cand.is_file():
+                found.append(cand)
+                break
+    return found
+
+
+def closeout_draft_errors(case_id: str, fields: dict, cases_root: Path | None) -> list[str]:
+    import files as _files
+
+    base = case_out_dir(case_id, cases_root)
+    errs: list[str] = []
+    verdict = str(fields.get("verdict_4") or "").strip()
+    for name in CLOSE_DRAFTS:
+        p = base / name
+        if not p.is_file():
+            p = base / "09" / name
+        if not p.is_file():
+            errs.append(f"missing:{name}")
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if not text.strip():
+            errs.append(f"empty:{name}")
+            continue
+        hits = _files.find_banned(p)
+        if hits:
+            errs.append(f"banned:{name}:{hits[0]}")
+        if verdict != "确认性 L1" and "实际交付：确认性 L1" in text.replace(" ", ""):
+            errs.append(f"reopen_l1:{name}")
+        if "close_no_reopen_l1" in text and "close_no_reopen_l1：否" in text.replace(" ", ""):
+            errs.append(f"reopen_l1:{name}")
+    return errs
+
+
+def _deposit_csv_paths(case_id: str, cases_root: Path | None) -> list[Path]:
+    paths = []
+    if cases_root is not None:
+        paths.append(Path(cases_root) / case_id / "measure" / "资产库" / "登记" / "deposits.csv")
+    paths.append(MEASURE_CASES / case_id / "资产库" / "登记" / "deposits.csv")
+    paths.append(ROOT / "流程" / "03 测量" / "资产库" / "登记" / "deposits.csv")
+    return paths
+
+
+def _plays_csv_paths(case_id: str, cases_root: Path | None) -> list[Path]:
+    paths = []
+    if cases_root is not None:
+        paths.append(Path(cases_root) / case_id / "measure" / "资产库" / "干预复盘" / "plays.csv")
+    paths.append(MEASURE_CASES / case_id / "资产库" / "干预复盘" / "plays.csv")
+    paths.append(ROOT / "流程" / "03 测量" / "资产库" / "干预复盘" / "plays.csv")
+    return paths
+
+
+def deposit_recorded(case_id: str, fields: dict, cases_root: Path | None) -> bool:
+    tools = str(ROOT / "流程" / "03 测量" / "工具")
+    import sys
+
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from asset_deposit import anon_project
+
+    want = anon_project(str(fields.get("project_id") or "").strip())
+    for path in _deposit_csv_paths(case_id, cases_root):
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                anon = str(row.get("project_anon") or "").strip()
+                cid = str(row.get("case_id") or "").strip()
+                status = str(row.get("status") or "").strip()
+                if cid == case_id and status:
+                    return True
+                if want and anon == want and status:
+                    return True
+    return False
+
+
+def _surfaces_from_freeze(fd: Path | None) -> tuple[set[str], set[str]]:
+    banned: set[str] = set()
+    owned: set[str] = set()
+    if fd is None or not fd.is_dir():
+        return banned, owned
+    aliases = fd / "aliases.csv"
+    if aliases.is_file():
+        for row in _read_csv_rows(aliases):
+            if (row.get("type") or "") == "self" and (row.get("surface") or "").strip():
+                banned.add(row["surface"].strip())
+    owned_p = fd / "owned_sources.csv"
+    if owned_p.is_file():
+        from urllib.parse import urlparse
+
+        for row in _read_csv_rows(owned_p):
+            pat = (row.get("pattern") or "").lower()
+            if not pat:
+                continue
+            if "://" in pat:
+                host = urlparse(pat).netloc.lower().removeprefix("www.")
+            else:
+                host = pat.replace("www.", "")
+            if host:
+                owned.add(host)
+    return banned, owned
+
+
+def close_leaks(case_id: str, fields: dict, cases_root: Path | None) -> list[str]:
+    tools = str(ROOT / "流程" / "03 测量" / "工具")
+    import sys
+
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from asset_deposit import leak_scan
+
+    fid = str(fields.get("freeze_id") or "").strip()
+    fd = resolve_freeze_dir(fid, case_id, cases_root) if fid else None
+    banned, owned = _surfaces_from_freeze(fd)
+    blob = ""
+    for p in closeout_draft_paths(case_id, cases_root):
+        blob += p.read_text(encoding="utf-8", errors="replace")
+    for path in _deposit_csv_paths(case_id, cases_root):
+        if path.is_file() and (cases_root is None or _is_under(path, Path(cases_root))):
+            blob += path.read_text(encoding="utf-8", errors="replace")
+    return leak_scan(blob, banned, owned)
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def plays_recorded(case_id: str, cases_root: Path | None) -> bool:
+    for path in _plays_csv_paths(case_id, cases_root):
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            rows = [r for r in csv.DictReader(f) if any(str(v or "").strip() for v in r.values())]
+        if rows:
+            return True
+    return False
+
+
+def archive_errors(case_id: str, fields: dict, cases_root: Path | None) -> list[str]:
+    import files as _files
+
+    errs: list[str] = []
+    board = _files.board(case_id, cases_root)
+    if board.get("locks"):
+        errs.append("locks")
+    if not deposit_recorded(case_id, fields, cases_root):
+        errs.append("deposits")
+    handover = [p for p in closeout_draft_paths(case_id, cases_root) if p.name == "09_资产移交.md"]
+    if not handover:
+        errs.append("handover")
+    leaks = close_leaks(case_id, fields, cases_root)
+    if leaks:
+        errs.append("leak")
+    if str(fields.get("sop_stage") or "") == "冲刺" and not plays_recorded(case_id, cases_root):
+        errs.append("plays")
+    return errs
+
+
+def _read_csv_rows(path: Path) -> list[dict]:
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _csv_identity_errors(path: Path, expect: dict, label: str) -> list[str]:
+    if not path.is_file():
+        return [f"{label}:missing"]
+    rows = _read_csv_rows(path)
+    if not rows:
+        return [f"{label}:empty"]
+    header = set(rows[0].keys())
+    miss_cols = [k for k in IDENTITY_KEYS if k not in header]
+    if miss_cols:
+        return [f"{label}:no_identity"]
+    errs = []
+    for i, row in enumerate(rows):
+        for key in IDENTITY_KEYS:
+            got = str(row.get(key) or "").strip()
+            want = str(expect.get(key) or "").strip()
+            if not got:
+                errs.append(f"{label}:missing_{key}")
+            elif got != want:
+                errs.append(f"{label}:mismatch_{key}")
+        if errs:
+            return errs
+        if i > 200:
+            break
+    return errs
+
+
+def _manifest_file_digest(man: dict, name: str, path: Path) -> list[str]:
+    files = man.get("files") or {}
+    if name not in files:
+        return [f"manifest:missing_{name}"]
+    if not path.is_file() or files.get(name) != _file_digest(path):
+        return [f"manifest:checksum_{name}"]
+    return []
+
+
+def delivery_identity_errors(out_dir: Path, expect: dict) -> list[str]:
+    man_p = Path(out_dir) / "evidence_manifest.json"
+    daily_p = Path(out_dir) / "metrics_daily.csv"
+    cov_p = Path(out_dir) / "coverage.csv"
+    did_p = Path(out_dir) / "did.csv"
+    errs: list[str] = []
+    if not man_p.is_file():
+        return ["evidence_manifest"]
+    try:
+        man = json.loads(man_p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return ["evidence_manifest"]
+    for key in IDENTITY_KEYS:
+        got = str(man.get(key) or "").strip()
+        want = str(expect.get(key) or "").strip()
+        if not got or got != want:
+            errs.append(f"manifest:{key}")
+    errs.extend(_manifest_file_digest(man, "metrics_daily.csv", daily_p))
+    errs.extend(_manifest_file_digest(man, "coverage.csv", cov_p))
+    errs.extend(_csv_identity_errors(daily_p, expect, "metrics_daily.csv"))
+    errs.extend(_csv_identity_errors(cov_p, expect, "coverage.csv"))
+    if did_p.is_file():
+        errs.extend(_csv_identity_errors(did_p, expect, "did.csv"))
+        files = man.get("files") or {}
+        if "did.csv" in files and files.get("did.csv") != _file_digest(did_p):
+            errs.append("manifest:checksum_did.csv")
     return errs
 
 
@@ -469,6 +803,8 @@ def _enforce_delivery(state: dict, incoming: dict, cases_root: Path | None) -> N
     out = resolve_delivery_dir(state.get("case_id") or "", cases_root)
     if out is None:
         _fail("no case delivery files under 案件/{本案}/出数")
+    if not delivery_report_files(out):
+        _fail("no customer delivery report")
     computed = delivery_files_checksum(out)
     if not computed:
         _fail("no case delivery files under 案件/{本案}/出数")
@@ -480,9 +816,14 @@ def _enforce_delivery(state: dict, incoming: dict, cases_root: Path | None) -> N
     fd = resolve_freeze_dir(fid, state.get("case_id") or "", cases_root)
     if fd is None:
         _fail("delivery freeze_id must match locked freeze")
-    mismatch = freeze_contract_errors(fd, _merged_fields(state, incoming, {}))
+    merged = _merged_fields(state, incoming, {})
+    mismatch = freeze_contract_errors(fd, merged)
     if mismatch:
         _fail("delivery freeze_id must match locked freeze")
+    expect = _evidence_identity(state.get("case_id") or "", merged)
+    ident_errs = delivery_identity_errors(out, expect)
+    if ident_errs:
+        _fail("delivery identity does not match freeze: " + ",".join(ident_errs[:6]))
     incoming["freeze_match"] = "是"
 
 
@@ -490,14 +831,19 @@ def _enforce_close(state: dict, incoming: dict, cases_root: Path | None) -> None
     import files as _files
 
     case_id = state.get("case_id") or ""
+    merged = _merged_fields(state, incoming, {})
     board = _files.board(case_id, cases_root)
     if board.get("pending"):
         _fail("transfer board still has pending items")
     incoming["close_board_empty"] = "是"
-    if board.get("locks"):
+    draft_errs = closeout_draft_errors(case_id, merged, cases_root)
+    if draft_errs:
+        _fail("closeout drafts missing or invalid")
+    arch_errs = archive_errors(case_id, merged, cases_root)
+    if arch_errs:
         _fail("archive checklist incomplete")
     incoming["close_archive_ok"] = "是"
-    doc_errs = formal_docs_checksum_errors(case_id, cases_root)
+    doc_errs = formal_docs_checksum_errors(case_id, cases_root, state)
     if doc_errs:
         _fail("formal manifest does not match gates")
     incoming["close_manifest_ok"] = "是"

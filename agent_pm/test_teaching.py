@@ -337,7 +337,7 @@ def _walk(sop: str) -> None:
         {"fields": {"vertical": "v", "city": "c", "client_code": "x", "sop_stage_intent": sop, "ban_ack": "是"}},
         cases_root=root,
     )
-    engine.decide(st, "G0", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G0", root)
     _pass(st, root)
     engine.apply_fields(
         st,
@@ -360,28 +360,28 @@ def _walk(sop: str) -> None:
         },
         cases_root=root,
     )
-    engine.decide(st, "G1", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G1", root)
     assert st["stage"] == "07"
     scope = {"诊断": "冻结+噪声+基线+抽检", "冲刺": "冻结+噪声+基线+一类证据+复测", "续约": "weekly+calib"}[sop]
     _pass(st, root)
     engine.apply_fields(st, {"fields": {"budget_hours": "12", "budget_scope": scope, "quote_excludes_l1": "是"}}, cases_root=root)
-    engine.decide(st, "G6", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G6", root)
     _pass(st, root)
     engine.apply_fields(
         st,
         {"fields": {"stakeholder_decision": "客户决策人", "comms_cadence": "每周", "comms_bound": "不得宽于四选一", "comms_api_not_primary": "是"}},
         cases_root=root,
     )
-    engine.decide(st, "G7", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G7", root)
     assert st["stage"] == "03"
     _pass(st, root)
     extra03 = {"verdict_4": "不能下结论"} if sop == "续约" else None
     tap._apply03(st, root, extra=extra03)
-    engine.decide(st, "G3", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G3", root)
     windows = {"诊断": ["noise", "baseline"], "冲刺": ["noise", "baseline", "intervention", "retest"], "续约": ["weekly", "calib"]}[sop]
     _pass(st, root)
     engine.apply_fields(st, {"windows": windows, "fields": {"plan_hours": "10"}}, cases_root=root)
-    engine.decide(st, "G2", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G2", root)
     _pass(st, root)
     klass = "无" if sop == "诊断" else ("FAQ" if sop == "冲刺" else "无")
     extra = {}
@@ -396,7 +396,7 @@ def _walk(sop: str) -> None:
             }
         )
     engine.apply_fields(st, {"fields": {"intervention_class": klass, **extra}}, cases_root=root)
-    engine.decide(st, "G5", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G5", root)
     _pass(st, root)
     v = {"诊断": "描述基线", "冲刺": "受控前后描述", "续约": "不能下结论"}[sop]
     engine.apply_fields(
@@ -404,9 +404,11 @@ def _walk(sop: str) -> None:
         {"fields": {"verdict_4": v, "delivery_accepted": "是"}},
         cases_root=root,
     )
-    engine.decide(st, "G4", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G4", root)
     assert st["stage"] == "09"
     _pass(st, root)
+    tap._seed_closeout(root, st)
+    tap._seed_deposit(root, st)
     engine.apply_fields(
         st,
         {
@@ -418,7 +420,7 @@ def _walk(sop: str) -> None:
         },
         cases_root=root,
     )
-    engine.decide(st, "G8", "APPROVE", actor="human", cases_root=root)
+    tap._approve(st, "G8", root)
     assert engine.next_action(st)["waiting"] == "done"
     assert st["activity"] == "done"
 

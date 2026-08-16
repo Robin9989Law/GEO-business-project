@@ -70,6 +70,10 @@ FIELDNAMES = [
     "n_bootstrap",
     "n_clusters",
     "notes",
+    "case_id",
+    "project_id",
+    "freeze_id",
+    "config_checksum",
 ]
 
 
@@ -334,6 +338,10 @@ def rollup(
                     "n_bootstrap": nb,
                     "n_clusters": str(nc),
                     "notes": "need_equal_cluster_bootstrap",
+                    "case_id": case_id or "",
+                    "project_id": project_id or "",
+                    "freeze_id": freeze_id or "",
+                    "config_checksum": ck,
                 }
             )
             last_brand[slice_key] = mentioned
@@ -453,6 +461,7 @@ COVER_FIELDS = [
 ]
 
 EVIDENCE_NAMES = ("did.csv", "coverage.csv")
+MANIFEST_HASH_FILES = ("did.csv", "coverage.csv", "metrics_daily.csv")
 
 
 def _file_digest(path: Path) -> str:
@@ -534,7 +543,7 @@ def write_evidence_manifest(out_dir: Path, ident: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = dict(ident)
     files = {}
-    for name in EVIDENCE_NAMES:
+    for name in MANIFEST_HASH_FILES:
         p = out_dir / name
         if p.is_file():
             files[name] = _file_digest(p)
@@ -563,6 +572,9 @@ def evidence_bundle_ok(out_dir: Path, ident: dict) -> bool:
     for name, path in (("did.csv", did_p), ("coverage.csv", cov_p)):
         if files.get(name) != _file_digest(path):
             return False
+    daily_p = out_dir / "metrics_daily.csv"
+    if daily_p.is_file() and files.get("metrics_daily.csv") != _file_digest(daily_p):
+        return False
     did_run = csv_evidence_run_id(did_p)
     cov_run = csv_evidence_run_id(cov_p)
     man_run = str(got.get("evidence_run_id") or "").strip()
